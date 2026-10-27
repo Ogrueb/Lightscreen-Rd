@@ -241,6 +241,12 @@ jobs:
         shell: pwsh
         run: .github\scripts\fetch-optimizers.ps1 -Destination deploy
 
+      # The runner has a real desktop: the deployed app starts in the tray, a hotkey pressed from outside saves a
+      # whole-screen PNG (bug 33), and --quit ends it. Runs on a copy, so the artifact stays clean.
+      - name: Windows smoke
+        shell: powershell
+        run: .github\scripts\windows-smoke.ps1 -App deploy -Work smoke
+
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
