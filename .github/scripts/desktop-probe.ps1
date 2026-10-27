@@ -107,11 +107,24 @@ try {
 $g.Dispose()
 $form.Close()
 
-# 4. Lightscreen Rd from the tray: Print Screen saves a whole-screen PNG.
-$shots = "$Out\shots"
-New-Item -ItemType Directory -Force $shots | Out-Null
+# 4. Lightscreen Rd from the tray: the whole-screen hotkey saves a PNG. Tried with Print Screen and with F9; the
+# desktop is saved after the start and after the press, so a dialog the app shows is visible in the artifact.
+function SaveScreen($path) {
+    $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+    $gr = [System.Drawing.Graphics]::FromImage($bmp)
+    $gr.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+    $bmp.Save($path)
+    $gr.Dispose(); $bmp.Dispose()
+}
+
 $exe = (Resolve-Path "$App\lightscreen.exe").Path
-@"
+$documents = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Screenshots'
+
+foreach ($key in @(@{ Name = 'Print'; Vk = 0x2C }, @{ Name = 'F9'; Vk = 0x78 })) {
+    $shots = "$Out\shots-$($key.Name)"
+    New-Item -ItemType Directory -Force $shots | Out-Null
+    @"
 [file]
 format=0
 enabled=true
@@ -123,27 +136,34 @@ disableUpdater=true
 
 [actions]
 screen\enabled=true
-screen\hotkey=Print
+screen\hotkey=$($key.Name)
 "@ | Set-Content -Encoding ASCII "$App\config.ini"
 
-$proc = Start-Process $exe -PassThru
-Start-Sleep -Seconds 6
-Report 'Lightscreen running after 6 s' (-not $proc.HasExited)
-[Probe]::keybd_event(0x2C, 0, 0, [UIntPtr]::Zero)
-[Probe]::keybd_event(0x2C, 0, 2, [UIntPtr]::Zero)
-$file = $null
-for ($i = 0; $i -lt 20 -and -not $file; $i++) { Start-Sleep -Milliseconds 500; $file = Get-ChildItem $shots -Filter *.png | Select-Object -First 1 }
-if ($file) {
-    $img = [System.Drawing.Image]::FromFile($file.FullName)
-    Report 'Lightscreen Print Screen from the tray' "saved $($file.Name), $($img.Width)x$($img.Height)"
-    $img.Dispose()
-} else {
-    Report 'Lightscreen Print Screen from the tray' 'no file within 10 s'
+    $proc = Start-Process $exe -PassThru
+    Start-Sleep -Seconds 6
+    Report "Lightscreen ($($key.Name)) running after 6 s" (-not $proc.HasExited)
+    SaveScreen "$Out\lightscreen-$($key.Name)-started.png"
+    [Probe]::keybd_event([byte]$key.Vk, 0, 0, [UIntPtr]::Zero)
+    [Probe]::keybd_event([byte]$key.Vk, 0, 2, [UIntPtr]::Zero)
+    $file = $null
+    for ($i = 0; $i -lt 20 -and -not $file; $i++) {
+        Start-Sleep -Milliseconds 500
+        $file = Get-ChildItem $shots, $documents -Recurse -Include *.png, *.jpg -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    SaveScreen "$Out\lightscreen-$($key.Name)-pressed.png"
+    if ($file) {
+        $img = [System.Drawing.Image]::FromFile($file.FullName)
+        Report "Lightscreen hotkey $($key.Name) from the tray" "saved $($file.FullName), $($img.Width)x$($img.Height)"
+        $img.Dispose()
+    } else {
+        Report "Lightscreen hotkey $($key.Name) from the tray" 'no file within 10 s'
+    }
+    Get-Content "$App\config.ini" | ForEach-Object { Write-Host "config.ini after run: $_" }
+    $quit = Start-Process $exe -ArgumentList '--quit' -PassThru
+    $quit.WaitForExit(10000) | Out-Null
+    Report "Lightscreen ($($key.Name)) exited after --quit" ($proc.WaitForExit(10000))
+    if (-not $proc.HasExited) { $proc.Kill() }
 }
-$quit = Start-Process $exe -ArgumentList '--quit' -PassThru
-$quit.WaitForExit(10000) | Out-Null
-Report 'Lightscreen exited after --quit' ($proc.WaitForExit(10000))
-if (-not $proc.HasExited) { $proc.Kill() }
 
 # Summary.
 $summary = "## Desktop probe`n`n| Check | Result |`n| --- | --- |`n"
