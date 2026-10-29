@@ -4,7 +4,7 @@ Changes in Lightscreen Rd, the maintained fork of Lightscreen by Christian Kaise
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Bug numbers refer to `docs/known-bugs/`.
 
-## [3.0.0] - unreleased
+## [3.0.0] - 2026-10-29
 
 First release of the fork, based on upstream Lightscreen 2.5. Settings and screenshot history from 2.5 are read from the same place and carry over unchanged.
 
