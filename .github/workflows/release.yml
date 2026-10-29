@@ -97,6 +97,23 @@ jobs:
           # The zip holds one top-level folder named like the zip.
           Compress-Archive -Path $dir -DestinationPath "${{ steps.version.outputs.zip }}"
 
+      # Unpacks the zip as a user would and checks what is in it, then runs the app from it (start, a hotkey from the
+      # tray saves a screenshot, --quit).
+      - name: Check the zip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = "lightscreen-rd-${{ steps.version.outputs.version }}-win64"
+          Expand-Archive "${{ steps.version.outputs.zip }}" -DestinationPath unpacked
+          $top = @(Get-ChildItem unpacked)
+          if ($top.Count -ne 1 -or $top[0].Name -ne $dir) { throw "the zip should hold exactly one folder $dir, it holds: $($top.Name -join ', ')" }
+          $expected = 'lightscreen.exe', 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll', 'Qt6Sql.dll',
+                      'platforms\qwindows.dll', 'imageformats\qwebp.dll', 'sqldrivers\qsqlite.dll', 'tls',
+                      'oxipng.exe', 'optipng.exe', 'licenses\oxipng', 'licenses\optipng'
+          $missing = $expected | Where-Object { -not (Test-Path "unpacked\$dir\$_") }
+          if ($missing) { throw "missing from the zip: $($missing -join ', ')" }
+          .github\scripts\windows-smoke.ps1 -App "unpacked\$dir" -Work smoke
+
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:

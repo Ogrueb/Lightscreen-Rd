@@ -9,6 +9,7 @@
 
 #include <tools/os.h>
 #include <tools/taskbar.h>
+#include <tools/windowpicker.h>
 
 #ifdef Q_OS_WIN
     #include <qt_windows.h>
@@ -24,6 +25,12 @@ private slots:
     {
         QStandardPaths::setTestModeEnabled(true);
         QSettings::setDefaultFormat(QSettings::IniFormat);
+#ifdef Q_OS_WIN
+        // Per-monitor DPI aware, as the app is (Qt's windows platform sets it; the offscreen platform the tests run on
+        // does not). Unaware, Windows scales some APIs' sizes and not others on a scaled display, and the capture
+        // tests compared sizes that disagree (2026-10-29 run at the owner's scaling).
+        ::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+#endif
     }
 
     // getDocumentsPath is never empty. On Linux it is $HOME/Documents, whether or not that directory exists.
@@ -173,6 +180,66 @@ private slots:
         const QRgb expected = qRgb(GetRValue(colour), GetGValue(colour), GetBValue(colour));
         QCOMPARE(image.pixel(middle) & 0xFFFFFF, expected & 0xFFFFFF);
         QCOMPARE(image.pixel(offScreen) & 0xFFFFFF, expected & 0xFFFFFF);
+    }
+
+    // Bug 42: the window picker picks the window under the cursor, in physical pixels. The event's position is in
+    // Qt's device-independent pixels; the test hands the picker half the cursor's position (what 200% scaling would
+    // give) and expects the window under the real cursor, not the one at that other point.
+    void windowPickerPicksWindowUnderCursor()
+    {
+        const COLORREF colour = RGB(30, 160, 60);
+        HBRUSH brush = ::CreateSolidBrush(colour);
+
+        WNDCLASSW windowClass = {};
+        windowClass.lpfnWndProc = ::DefWindowProcW;
+        windowClass.hInstance = ::GetModuleHandleW(nullptr);
+        windowClass.hbrBackground = brush;
+        windowClass.lpszClassName = L"LightscreenRdPickerTest";
+        QVERIFY(::RegisterClassW(&windowClass));
+
+        const int left = ::GetSystemMetrics(SM_CXSCREEN) / 2;
+        const int top = ::GetSystemMetrics(SM_CYSCREEN) / 2;
+        HWND window = ::CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, windowClass.lpszClassName, L"picker test",
+                                        WS_POPUP, left, top, 300, 200, nullptr, nullptr, windowClass.hInstance, nullptr);
+        QVERIFY(window);
+        ::ShowWindow(window, SW_SHOWNOACTIVATE);
+        ::UpdateWindow(window);
+        QTest::qWait(300);
+
+        const POINT target = { left + 150, top + 100 };
+        POINT cursor = { 0, 0 };
+        const bool ready = ::SetCursorPos(target.x, target.y) && ::GetCursorPos(&cursor) && cursor.x == target.x
+                           && cursor.y == target.y && ::GetAncestor(::WindowFromPoint(target), GA_ROOT) == window;
+
+        QPixmap picked;
+        int emitted = 0;
+
+        if (ready) {
+            WindowPicker *picker = new WindowPicker;
+            QObject::connect(picker, &WindowPicker::pixmap, picker, [&](const QPixmap &pixmap) {
+                picked = pixmap;
+                ++emitted;
+            });
+
+            QMouseEvent release(QEvent::MouseButtonRelease, QPointF(0, 0), QPointF(target.x / 2, target.y / 2),
+                                Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(picker, &release);
+            QTest::qWait(100); // the picker deletes itself on close
+        }
+
+        ::DestroyWindow(window);
+        ::UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
+        ::DeleteObject(brush);
+
+        if (!ready) {
+            QSKIP("Cannot place the cursor over a test window (no interactive desktop?)");
+        }
+
+        QCOMPARE(emitted, 1);
+        QVERIFY(!picked.isNull());
+        const QImage image = picked.toImage();
+        const QRgb expected = qRgb(GetRValue(colour), GetGValue(colour), GetBValue(colour));
+        QCOMPARE(image.pixel(image.width() / 2, image.height() / 2) & 0xFFFFFF, expected & 0xFFFFFF);
     }
 #endif
 
