@@ -195,6 +195,21 @@ private slots:
         QCOMPARE(d->resultRect(), expected);
     }
 
+    // Bug 45: a typed size is meant at the ratio of the screen the selection is on. The dialog window here has ratio
+    // 1.5 (as on a 150% main screen) while the only screen has ratio 1 (the selection on a 100% screen): typed 100x100
+    // saves 100x100, not 150x150. On one screen with the window's own ratio nothing changes (keyboardResize above).
+    void keyboardResize_usesTheSelectionsScreenRatio()
+    {
+        QCOMPARE(QGuiApplication::primaryScreen()->devicePixelRatio(), qreal(1));
+        setPixmap(QSize(640, 480), 1.5);
+        QScopedPointer<TestAreaDialog> d(dialog());
+        d->mKeyboardSize = "100x100";
+        d->keyboardResize();
+
+        QCOMPARE(d->mSelection.size(), QSize(67, 67));
+        QCOMPARE(d->resultRect().size(), QSize(100, 100));
+    }
+
     // A null pixmap has ratio 1.
     void resultRect_nullPixmap()
     {
