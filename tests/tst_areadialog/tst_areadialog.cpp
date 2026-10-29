@@ -210,6 +210,23 @@ private slots:
         QCOMPARE(d->resultRect().size(), QSize(100, 100));
     }
 
+    // The selection's tag shows its size at its own screen's ratio (bug 45): a typed size reads as typed, and a drawn
+    // selection reads in that screen's logical pixels. On one screen at the window's ratio it is the selection's size.
+    void sizeOnScreen()
+    {
+        setPixmap(QSize(640, 480), 1.5);
+        QScopedPointer<TestAreaDialog> d(dialog());
+        QCOMPARE(d->sizeOnScreen(), QSize(45, 60)); // 30x40 at window ratio 1.5 is 45x60 device pixels at ratio 1
+
+        d->mKeyboardSize = "100x100";
+        d->keyboardResize();
+        QCOMPARE(d->sizeOnScreen(), QSize(100, 100));
+
+        setPixmap(QSize(640, 480), 1);
+        QScopedPointer<TestAreaDialog> same(dialog());
+        QCOMPARE(same->sizeOnScreen(), QSize(30, 40));
+    }
+
     // A null pixmap has ratio 1.
     void resultRect_nullPixmap()
     {

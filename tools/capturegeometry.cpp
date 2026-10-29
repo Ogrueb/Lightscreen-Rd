@@ -100,10 +100,15 @@ QRect windowGeometry(const Screen &screen, const QRect &device)
     return QRect(first, QSize(last.x() - first.x(), last.y() - first.y()));
 }
 
-QSize typedSizeToDevice(const QList<Screen> &screens, const QPoint &device, const QSize &typed, qreal fallbackRatio)
+qreal ratioAt(const QList<Screen> &screens, const QPoint &device, qreal fallbackRatio)
 {
     const int index = dominantScreen(screens, QRect(device, QSize(1, 1)));
-    const qreal ratio = index >= 0 ? screens.at(index).ratio : fallbackRatio;
+    return index >= 0 ? screens.at(index).ratio : fallbackRatio;
+}
+
+QSize typedSizeToDevice(const QList<Screen> &screens, const QPoint &device, const QSize &typed, qreal fallbackRatio)
+{
+    const qreal ratio = ratioAt(screens, device, fallbackRatio);
     return QSize(qRound(typed.width() * ratio), qRound(typed.height() * ratio));
 }
 

@@ -1,7 +1,7 @@
 # Mixed-DPI capture and placement on two monitors (S04, M05; bugs 4, 5, 11, 12, 23, 45)
 
-The five-step short version passed on 2026-10-29 (owner; whole screen 5760x2167, the area outside both monitors filled black as expected), except step 3, which found bug 45. Left to re-check, on a build with bug 45's fix:
+The five-step short version passed on 2026-10-29 (owner; whole screen 5760x2167, the area outside both monitors filled black as expected), except the typed size, which found bug 45 and then its follow-up (the size tag and the typed text). Left to re-check, on a build with the follow-up:
 
-Setup: two monitors, one at 100% and one at 150%, "Grab only the active monitor." off.
+Setup: two monitors at different scaling, "Grab only the active monitor." off.
 
-1. **Typed size on each monitor.** On the 150% monitor, draw an area, type `100x100`, Enter twice: the file is 150x150. On the 100% monitor the same gives 100x100. Try it with each monitor as the main display if you can.
+1. **Typed size on the second monitor.** Draw an area on the non-main monitor and type `100x100`: the typed text appears at that area, not on the main monitor. Press Enter: the area's size tag reads `100x100`. Press Enter again: the file is 100x100 times that monitor's scaling (for example 125x125 at 125%).

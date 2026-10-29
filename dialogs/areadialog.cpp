@@ -178,6 +178,41 @@ void AreaDialog::grabRect()
     }
 }
 
+QPoint AreaDialog::selectionDeviceOrigin() const
+{
+    const QPoint origin = mDeviceGeometry.isEmpty() ? QGuiApplication::primaryScreen()->virtualGeometry().topLeft()
+                                                    : mDeviceGeometry.topLeft();
+    return origin + CaptureGeometry::selectionToDevice(normalizedRect(mSelection), mPixmap.devicePixelRatio()).topLeft();
+}
+
+static QList<CaptureGeometry::Screen> screenLayout()
+{
+    QList<CaptureGeometry::Screen> layout;
+
+    for (QScreen *screen : QGuiApplication::screens()) {
+        layout.append({ screen->geometry(), screen->devicePixelRatio(), QSize() });
+    }
+
+    return layout;
+}
+
+qreal AreaDialog::selectionScreenRatio() const
+{
+    return CaptureGeometry::ratioAt(screenLayout(), selectionDeviceOrigin(), mPixmap.devicePixelRatio());
+}
+
+QSize AreaDialog::sizeOnScreen() const
+{
+    const qreal screenRatio = selectionScreenRatio();
+
+    if (!mTypedDeviceSize.isEmpty() && mSelection.size() == mTypedSelectionSize) {
+        return QSize(qRound(mTypedDeviceSize.width() / screenRatio), qRound(mTypedDeviceSize.height() / screenRatio));
+    }
+
+    const qreal scale = mPixmap.devicePixelRatio() / screenRatio;
+    return QSize(qRound(mSelection.width() * scale), qRound(mSelection.height() * scale));
+}
+
 void AreaDialog::keyboardResize()
 {
     if (mKeyboardSize.contains("x")) {
@@ -193,17 +228,8 @@ void AreaDialog::keyboardResize()
 
                 // The window spans every screen with one ratio; the typed size is meant at the ratio of the screen
                 // the selection starts on (bug 45).
-                QList<CaptureGeometry::Screen> layout;
-
-                for (QScreen *screen : QGuiApplication::screens()) {
-                    layout.append({ screen->geometry(), screen->devicePixelRatio(), QSize() });
-                }
-
                 const qreal ratio = mPixmap.devicePixelRatio();
-                const QPoint origin = mDeviceGeometry.isEmpty() ? QGuiApplication::primaryScreen()->virtualGeometry().topLeft()
-                                                                : mDeviceGeometry.topLeft();
-                const QPoint start = origin + CaptureGeometry::selectionToDevice(mSelection, ratio).topLeft();
-                const QSize device = CaptureGeometry::typedSizeToDevice(layout, start, size, ratio);
+                const QSize device = CaptureGeometry::typedSizeToDevice(screenLayout(), selectionDeviceOrigin(), size, ratio);
 
                 mSelection.setSize(QSize(qMax(1, qRound(device.width() / ratio)), qMax(1, qRound(device.height() / ratio))));
 
@@ -597,7 +623,10 @@ void AreaDialog::paintEvent(QPaintEvent *e)
     }
 
     if (!mKeyboardSize.isEmpty()) {
-        QRect keyboardSizeRect = QGuiApplication::primaryScreen()->geometry();
+        // At the selection the size applies to, on whichever monitor it is (it used to sit at the main monitor's top
+        // left; bug 45). With no selection yet, the size applies from the dialog's top left.
+        QRect keyboardSizeRect = rect();
+        keyboardSizeRect.setTopLeft(mSelection.isNull() ? QPoint(0, 0) : normalizedRect(mSelection).topLeft());
 
         QFont originalFont = painter.font();
         QFont font = originalFont;
@@ -630,8 +659,10 @@ void AreaDialog::paintEvent(QPaintEvent *e)
         // The grabbed region is everything which is covered by the drawn
         // rectangles (border included). This means that there is no 0px
         // selection, since a 0px wide rectangle will always be drawn as a line.
-        QString txt = QString("%1x%2").arg(mSelection.width() == 0 ? 2 : mSelection.width())
-                      .arg(mSelection.height() == 0 ? 2 : mSelection.height());
+        // In the logical pixels of the selection's own monitor, which can differ from the window's (bug 45).
+        const QSize shown = sizeOnScreen();
+        QString txt = QString("%1x%2").arg(shown.width() == 0 ? 2 : shown.width())
+                      .arg(shown.height() == 0 ? 2 : shown.height());
         QRect textRect = painter.boundingRect(rect(), Qt::AlignLeft, txt);
         QRect boundingRect = textRect.adjusted(-4, 0, 0, 0);
 

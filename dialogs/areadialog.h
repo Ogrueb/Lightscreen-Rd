@@ -46,6 +46,8 @@ class AreaDialog : public QDialog
 public:
     AreaDialog(const QPixmap &pixmap, const Screenshot::Options &options, const QRect &deviceGeometry = QRect());
     QRect resultRect() const;
+    // The selection's size in the logical pixels of the screen it starts on, as its tag shows it (bug 45).
+    QSize sizeOnScreen() const;
     void setPixmap(const QPixmap &pixmap);
 
 protected slots:
@@ -105,6 +107,9 @@ protected:
     QPointer<QWidget> mAcceptWidget;
 
     QString mKeyboardSize;
+    // The selection's top left on the native desktop, and the ratio of the screen there (bug 45).
+    QPoint selectionDeviceOrigin() const;
+    qreal selectionScreenRatio() const;
     // A typed size on the native desktop (bug 45), and the selection size it was applied as. resultRect() uses it
     // while the selection keeps that size, so the file has exactly the typed size at the selection's screen's ratio.
     QSize mTypedDeviceSize;
