@@ -38,6 +38,8 @@ cmake --build --preset windows-msvc-release
 
 CMake finds Qt through `PATH` (it looks one level above each `bin` directory); to use another Qt, pass `-DCMAKE_PREFIX_PATH=C:\Qt\6.8.3\msvc2022_64` to the first command. The preset uses Ninja and `cl`, which is why it must run from the `vcvars64` prompt.
 
+Run every command in one `cmd` window (or open "x64 Native Tools Command Prompt for VS 2022", which runs `vcvars64.bat` for you). PowerShell does not keep what `vcvars64.bat` sets, so `cmake` is "not recognized" there, and a new window starts without `vcvars64`, CMake and Qt on `PATH`. If every test fails at once with exit code `0xc0000135`, Qt's `bin` is missing from `PATH` in that window. Run the tests through `ctest`: a test `.exe` started directly uses the real windows platform instead of `offscreen`, opens real windows and can hang (found in the 2026-10-29 Windows pass).
+
 Output: `build\windows-msvc-release\lightscreen.exe`, with the tests under `build\windows-msvc-release\tests\`. `build/` is git-ignored. A fresh configure is needed once after switching from a qmake checkout: delete the old `build\` folder first.
 
 ### Run / package
