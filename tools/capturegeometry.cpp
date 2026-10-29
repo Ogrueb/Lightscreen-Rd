@@ -100,6 +100,13 @@ QRect windowGeometry(const Screen &screen, const QRect &device)
     return QRect(first, QSize(last.x() - first.x(), last.y() - first.y()));
 }
 
+QSize typedSizeToDevice(const QList<Screen> &screens, const QPoint &device, const QSize &typed, qreal fallbackRatio)
+{
+    const int index = dominantScreen(screens, QRect(device, QSize(1, 1)));
+    const qreal ratio = index >= 0 ? screens.at(index).ratio : fallbackRatio;
+    return QSize(qRound(typed.width() * ratio), qRound(typed.height() * ratio));
+}
+
 QRect selectionToDevice(const QRect &selection, qreal ratio, const QSize &bounds)
 {
     // Until 3.0's QA pass every device pixel the selection touched was included, which made a typed 100x100 at 125%

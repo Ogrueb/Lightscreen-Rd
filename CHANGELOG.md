@@ -56,6 +56,7 @@ First release of the fork, based on upstream Lightscreen 2.5. Settings and scree
 - With "Sound cue" and "Tray icon Popup" both on, Windows plays its notification sound with the shutter. Turn the pop-up off, or turn off the sound for Lightscreen Rd's notifications in Windows' notification settings (bug 37).
 - On Windows 11, Print Screen opens Windows' Snipping Tool while "Use the Print screen key to open screen capture" is on (Settings > Accessibility > Keyboard; on by default). Turn it off, or give Lightscreen Rd another hotkey.
 - PNG screenshots always use compression quality 80, whatever the quality setting (bug 20).
+- Lowering the display scaling while the app runs can leave a strip at the main window's right edge until the window is resized (bug 44).
 - Wayland and macOS are not supported.
 
 ### For developers

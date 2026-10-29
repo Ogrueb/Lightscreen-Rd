@@ -68,6 +68,11 @@ QRect windowGeometry(const Screen &screen, const QRect &device);
 // selection with a positive size is clipped to the bounds when they are not empty.
 QRect selectionToDevice(const QRect &selection, qreal ratio, const QSize &bounds = QSize());
 
+// A size typed in the area dialog ("100x100") on the native desktop. It is meant in the logical pixels of the screen
+// at the device point (the selection's top left), so it is scaled by that screen's ratio, not by the dialog window's
+// single ratio (the window spans every screen; bug 45). Off every screen, fallbackRatio is used.
+QSize typedSizeToDevice(const QList<Screen> &screens, const QPoint &device, const QSize &typed, qreal fallbackRatio);
+
 } // namespace CaptureGeometry
 
 #endif // CAPTUREGEOMETRY_H

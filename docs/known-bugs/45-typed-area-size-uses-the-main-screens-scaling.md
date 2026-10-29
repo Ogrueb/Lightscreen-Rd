@@ -1,0 +1,7 @@
+# 45. A typed area size used the main monitor's scaling on every monitor
+
+- **Found:** by the owner in the two-monitor check on 2026-10-29 (`2026-10-22-mixed-dpi-capture.md` step 3), monitors at 100% and 150%: a typed `100x100` gave a file of the same size on both monitors, at the main (larger) monitor's scaling, instead of 100x100 on the 100% monitor and 150x150 on the 150% one.
+- **Cause:** the area dialog is one window over every monitor, and a window has a single device pixel ratio, its main screen's. `keyboardResize` set the typed size in the window's coordinates, so it was scaled by that one ratio wherever the selection was. S04 made the desktop and the selection pixel-exact across monitors but did not consider typed sizes.
+- **Fix:** `CaptureGeometry::typedSizeToDevice` scales the typed size by the ratio of the screen under the selection's top left corner. The dialog sizes the selection to match, and `resultRect()` uses that exact device size while the selection keeps it (a mouse press clears it). On one monitor, or on the window's own screen, nothing changes.
+- **Tests:** `tst_CaptureGeometry::typedSizeToDevice` (rows for each screen and off screen) and `tst_AreaDialog::keyboardResize_usesTheSelectionsScreenRatio` (window ratio 1.5, screen ratio 1: typed 100x100 saves 100x100). The latter fails without the fix.
+- **Platform:** all, with monitors at different scaling. **Status:** fixed, awaiting the owner's re-check (step 3 of `2026-10-22-mixed-dpi-capture.md`).

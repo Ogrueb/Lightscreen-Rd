@@ -129,7 +129,14 @@ AreaDialog::AreaDialog(const QPixmap &pixmap, const Screenshot::Options &options
 // The selection in the pixmap's device pixels: every device pixel the selection touches, within the pixmap.
 QRect AreaDialog::resultRect() const
 {
-    return CaptureGeometry::selectionToDevice(mSelection, mPixmap.devicePixelRatio(), mPixmap.size());
+    QRect result = CaptureGeometry::selectionToDevice(mSelection, mPixmap.devicePixelRatio(), mPixmap.size());
+
+    if (!mTypedDeviceSize.isEmpty() && mSelection.size() == mTypedSelectionSize) {
+        result.setSize(mTypedDeviceSize);
+        result = result.intersected(QRect(QPoint(0, 0), mPixmap.size()));
+    }
+
+    return result;
 }
 
 // The pixmap's size in the dialog's coordinates.
@@ -184,10 +191,26 @@ void AreaDialog::keyboardResize()
             if (okw && okh && size.width() > 0 && size.height() > 0) {
                 auto oldSize = mSelection.size();
 
-                mSelection.setSize(size);
+                // The window spans every screen with one ratio; the typed size is meant at the ratio of the screen
+                // the selection starts on (bug 45).
+                QList<CaptureGeometry::Screen> layout;
+
+                for (QScreen *screen : QGuiApplication::screens()) {
+                    layout.append({ screen->geometry(), screen->devicePixelRatio(), QSize() });
+                }
+
+                const qreal ratio = mPixmap.devicePixelRatio();
+                const QPoint origin = mDeviceGeometry.isEmpty() ? QGuiApplication::primaryScreen()->virtualGeometry().topLeft()
+                                                                : mDeviceGeometry.topLeft();
+                const QPoint start = origin + CaptureGeometry::selectionToDevice(mSelection, ratio).topLeft();
+                const QSize device = CaptureGeometry::typedSizeToDevice(layout, start, size, ratio);
+
+                mSelection.setSize(QSize(qMax(1, qRound(device.width() / ratio)), qMax(1, qRound(device.height() / ratio))));
 
                 if (rect().contains(mSelection)) {
                     updateHandles();
+                    mTypedDeviceSize = device;
+                    mTypedSelectionSize = mSelection.size();
                 } else {
                     mSelection.setSize(oldSize); // Reverting size
                 }
@@ -470,6 +493,7 @@ void AreaDialog::mousePressEvent(QMouseEvent *e)
 
     if (e->button() == Qt::LeftButton) {
         mMouseDown = true;
+        mTypedDeviceSize = QSize();
         mDragStartPoint = e->position().toPoint();
         mSelectionBeforeDrag = mSelection;
         if (!mSelection.contains(e->position().toPoint())) {

@@ -215,6 +215,33 @@ private slots:
         QVERIFY(result.intersects(CaptureGeometry::deviceRect(layout.at(0)).translated(-device.topLeft())));
         QVERIFY(result.intersects(CaptureGeometry::deviceRect(layout.at(1)).translated(-device.topLeft())));
     }
+
+    // Bug 45: a typed size is scaled by the ratio of the screen the selection starts on, not the dialog window's.
+    void typedSizeToDevice_data()
+    {
+        QTest::addColumn<QPoint>("device");
+        QTest::addColumn<QSize>("expected");
+
+        const Layout layout = sideBySide();
+        const QPoint left = CaptureGeometry::deviceRect(layout.at(0)).topLeft();
+        const QPoint right = CaptureGeometry::deviceRect(layout.at(1)).topLeft();
+
+        QTest::newRow("on the left screen") << left + QPoint(10, 10)
+                                            << QSize(qRound(100 * layout.at(0).ratio), qRound(100 * layout.at(0).ratio));
+        QTest::newRow("on the right screen") << right + QPoint(10, 10)
+                                             << QSize(qRound(100 * layout.at(1).ratio), qRound(100 * layout.at(1).ratio));
+        QTest::newRow("off every screen, fallback 2") << QPoint(-50000, -50000) << QSize(200, 200);
+    }
+
+    void typedSizeToDevice()
+    {
+        QFETCH(QPoint, device);
+        QFETCH(QSize, expected);
+
+        const Layout layout = sideBySide();
+        QVERIFY(layout.at(0).ratio != layout.at(1).ratio);
+        QCOMPARE(CaptureGeometry::typedSizeToDevice(layout, device, QSize(100, 100), 2), expected);
+    }
 };
 
 QTEST_APPLESS_MAIN(tst_CaptureGeometry)

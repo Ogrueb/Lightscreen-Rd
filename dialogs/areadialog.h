@@ -105,6 +105,10 @@ protected:
     QPointer<QWidget> mAcceptWidget;
 
     QString mKeyboardSize;
+    // A typed size on the native desktop (bug 45), and the selection size it was applied as. resultRect() uses it
+    // while the selection keeps that size, so the file has exactly the typed size at the selection's screen's ratio.
+    QSize mTypedDeviceSize;
+    QSize mTypedSelectionSize;
 };
 
 #endif
