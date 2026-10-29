@@ -3,6 +3,7 @@
 # file names, and that no two known bugs share a number.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+shopt -s nullglob # an empty folder (docs/windows-qa after a finished pass) has no entries to check
 fail=0
 
 for dir in docs/status docs/decisions docs/windows-qa; do
