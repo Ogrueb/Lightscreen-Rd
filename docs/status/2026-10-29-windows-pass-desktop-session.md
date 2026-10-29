@@ -17,3 +17,9 @@ A Claude session in the Claude desktop app ran the [Claude] checks of the owner'
   - B1's history-menu step: the first half passed.
   - B1 uploads were not run, as agreed.
 - **Re-checks:** bug 42 with a real mouse at the owner's scaling (in the two window-capture checks), and `ctest` at that scaling for bug 43.
+- **2026-10-29, owner's re-checks** on the `master` CI build at `dd6e58a`:
+  - R1 window picker with a real mouse, Explorer partly off screen, and Windows 11 corners passed. The first try ran a build from before the fix and failed; the D1 build in `LS-Rd-test\src` predates PR #59.
+  - R2 Print Screen from the tray passed.
+  - R4 exact area sizes passed. The area dialog's size label shows the typed (device-independent) size, by design.
+  - C1 passed. Lowering the scale while the app runs leaves a strip at the window's edge: **bug 44**, a known minor issue (owner).
+- **QA files:** the passed checks are removed. Left: autostart (`2026-10-20-qt6-flip.md`), `ctest` at the owner's scaling (`2026-10-21-cmake-build.md`), the short two-monitor check (`2026-10-22-mixed-dpi-capture.md`, which replaces `2026-10-15-qscreen-capture-and-placement.md`), B1 (`2026-10-21-custom-uploader.md`, plus upload progress in `2026-10-16-taskbar-without-winextras.md`) and the release (`2026-10-22-release-v3.md`).
