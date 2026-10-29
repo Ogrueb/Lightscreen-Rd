@@ -247,6 +247,10 @@ void OptionsDialog::loadSettings()
     ui.optimizerComboBox->setCurrentIndex(ui.optimizerComboBox->findData(optimizer));
     mOptimizerPicked = false;
 
+    // With no optimizer at all, the tool choice is moot: the box is hidden, which leaves the hint room to show in full
+    // at the dialog's default width (it was cut off; 2026-10-29 Windows pass).
+    ui.optimizerComboBox->setVisible(!automatic.isEmpty());
+
     if (automatic.isEmpty()) {
         ui.optiPngCheckBox->setEnabled(false);
 #ifdef Q_OS_WIN

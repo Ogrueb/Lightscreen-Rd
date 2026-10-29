@@ -141,16 +141,25 @@ void WindowPicker::closeEvent(QCloseEvent *)
     deleteLater();
 }
 
+#if defined(Q_OS_WIN)
+// The cursor in physical screen pixels, as WindowFromPoint expects. The event's globalPosition() is in Qt's
+// device-independent pixels, which differ from physical pixels at 125% or 150% scaling, so the picker used to pick the
+// window at a point up and to the left of the cursor (found in the 2026-10-29 Windows pass, bug 42).
+static POINT cursorPosition()
+{
+    POINT position = { 0, 0 };
+    ::GetCursorPos(&position);
+    return position;
+}
+#endif
+
 void WindowPicker::mouseMoveEvent(QMouseEvent *event)
 {
     QString windowName;
 
 #if defined(Q_OS_WIN)
-    POINT mousePos;
-    mousePos.x = event->globalPosition().toPoint().x();
-    mousePos.y = event->globalPosition().toPoint().y();
-
-    HWND cWindow = GetAncestor(WindowFromPoint(mousePos), GA_ROOT);
+    Q_UNUSED(event);
+    HWND cWindow = GetAncestor(WindowFromPoint(cursorPosition()), GA_ROOT);
 
     mCurrentWindow = (WId) cWindow;
 
@@ -287,11 +296,7 @@ void WindowPicker::mouseReleaseEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton) {
 #if defined(Q_OS_WIN)
-        POINT mousePos;
-        mousePos.x = event->globalPosition().toPoint().x();
-        mousePos.y = event->globalPosition().toPoint().y();
-
-        HWND nativeWindow = GetAncestor(WindowFromPoint(mousePos), GA_ROOT);
+        HWND nativeWindow = GetAncestor(WindowFromPoint(cursorPosition()), GA_ROOT);
 #elif defined(Q_OS_LINUX)
         Window nativeWindow = os::windowUnderCursor(false);
 #endif

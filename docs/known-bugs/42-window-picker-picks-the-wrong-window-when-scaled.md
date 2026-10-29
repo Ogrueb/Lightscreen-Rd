@@ -1,0 +1,7 @@
+# 42. The window picker picked the window behind the one under the cursor at display scaling above 100%
+
+- **Found:** in the 2026-10-29 Windows pass, by a Claude desktop session with computer use on the owner's PC (a 3840x2160 display, scaled). Dropped on Settings, the picker saved Notepad behind it. Dropped on Notepad, it named "Program Manager" and saved the bare desktop. It picked Explorer correctly once, by chance. The session used simulated mouse input; the owner's A3 report on 2026-10-23 ("both windows are captured") was probably the same bug.
+- **Cause:** `WindowPicker` passed the mouse event's `globalPosition()` to `WindowFromPoint`. In Qt 6 that position is in device-independent pixels; `WindowFromPoint` takes physical pixels (the app is per-monitor DPI aware). Above 100% the picker looked up a point up and to the left of the cursor, often on the window behind. Stage 7's exact-scale change (no rounding of 125% to 100%) made it show at fractional scaling as well.
+- **Fix:** the picker reads the cursor with `GetCursorPos` (physical pixels) on move and on release.
+- **Test:** `tst_Os::windowPickerPicksWindowUnderCursor` (Windows) puts the cursor over a test window, hands the picker half that position as the event's position, and expects the test window. It fails without the fix.
+- **Platform:** Windows. **Status:** fixed, awaiting the owner's re-check with a real mouse at their scaling (`2026-10-20-qt6-flip.md`, `2026-10-14-window-capture-bounds.md`).
