@@ -29,6 +29,7 @@
 #include <QStringBuilder>
 
 #include <tools/capturegeometry.h>
+#include <tools/hdrcapture.h>
 #include <tools/screenshot.h>
 #include <tools/windowpicker.h>
 
@@ -443,7 +444,14 @@ void Screenshot::grabDesktop()
     bool grabbed = false;
 
     for (QScreen *screen : screens) {
-        const QPixmap grab = screen->grabWindow(0);
+        // A monitor in HDR mode is read through desktop duplication, as Qt's grab can return browsers too bright
+        // there (bug 9); anything else, or a failure, keeps Qt's grab.
+        QPixmap grab = HdrCapture::grabScreen(screen->name());
+
+        if (grab.isNull()) {
+            grab = screen->grabWindow(0);
+        }
+
         grabbed = grabbed || !grab.isNull();
         grabs.append(grab);
         layout.append({ screen->geometry(), screen->devicePixelRatio(), grab.size() });

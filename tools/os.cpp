@@ -64,6 +64,7 @@
     #include <X11/Xatom.h>
 #endif
 
+#include <tools/hdrcapture.h>
 #include <tools/os.h>
 
 #ifdef Q_OS_WIN
@@ -250,6 +251,19 @@ QPixmap os::grabWindow(WId winId)
     const int height = rcWindow.bottom - rcWindow.top;
     const int fullWidth = rcFull.right - rcFull.left;
     const int fullHeight = rcFull.bottom - rcFull.top;
+
+    // On a monitor in HDR mode, Windows.Graphics.Capture reads the window in FP16, where PrintWindow can return a
+    // browser several times too bright (bug 9). Its frame is the window's visible frame, or the whole window rectangle
+    // on some versions, which is cropped as below.
+    const QPixmap hdr = HdrCapture::grabWindow(winId);
+
+    if (!hdr.isNull()) {
+        if (hdr.size() == QSize(fullWidth, fullHeight)) {
+            return hdr.copy(rcWindow.left - rcFull.left, rcWindow.top - rcFull.top, width, height);
+        }
+
+        return hdr;
+    }
 
     // PrintWindow with PW_RENDERFULLCONTENT (Windows 8.1 and later) has Windows draw the window itself into our
     // bitmap, DirectComposition content included (the title bars and toolbars of current apps, browsers), whatever
