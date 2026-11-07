@@ -22,15 +22,17 @@
 #include <QImage>
 #include <QPixmap>
 #include <QString>
+#include <qwindowdefs.h>
 
-// Desktop capture of a monitor in HDR mode (bug 9).
+// Capture on a monitor in HDR mode (bug 9).
 //
 // With HDR on, Windows composes the desktop in scRGB: linear light, sRGB primaries, 1.0 = 80 nits, and SDR white at
-// the "SDR content brightness" level (SDR white level / 1000 in scRGB units, 2.5 at 200 nits). Qt's screen grab reads
-// the desktop through GDI, which gets most windows right but can return a browser's hardware-composited content
-// with SDR white well above 1.0, so it clips: a page comes out several times too bright, with coloured fringes
-// where one channel clips before the others. Reading the composed desktop in FP16 through DXGI desktop duplication
-// and dividing by the SDR white level gives what the screen shows for SDR content; HDR highlights above SDR white clip.
+// the "SDR content brightness" level (SDR white level / 1000 in scRGB units, 2.5 at 200 nits). Qt's screen grab
+// (GDI) and PrintWindow get most windows right but can return a browser's hardware-composited content as if 1.0 were
+// white, so it clips: a page comes out several times too bright, with coloured fringes where one channel clips before
+// the others. Reading the desktop through DXGI desktop duplication, or one window through Windows.Graphics.Capture,
+// in FP16 and dividing by the SDR white level gives what the screen shows for SDR content; HDR highlights above SDR
+// white clip.
 namespace HdrCapture {
 
 // Converts FP16 RGBA scRGB pixels (DXGI_FORMAT_R16G16B16A16_FLOAT, rows bytesPerLine apart) to an opaque 8-bit sRGB
@@ -41,6 +43,11 @@ QImage scRgbToSrgb(const void *pixels, int width, int height, int bytesPerLine, 
 // it is in HDR mode. A null pixmap when it is not (SDR monitors keep Qt's grab), on other platforms, or when anything
 // fails, so the caller falls back to Qt's grab.
 QPixmap grabScreen(const QString &deviceName);
+
+// The window, when the monitor it is mostly on is in HDR mode, through Windows.Graphics.Capture in FP16 with that
+// monitor's SDR white level: the whole window as Windows renders it (covered or partly off screen too), at the size
+// Windows.Graphics.Capture gives. A null pixmap otherwise or on any failure, so the caller keeps PrintWindow.
+QPixmap grabWindow(WId window);
 
 } // namespace HdrCapture
 

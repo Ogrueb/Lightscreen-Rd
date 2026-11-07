@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Bug
 
 ### Fixed
 
-- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in full-screen, monitor and area captures. Such a monitor is now read through DXGI desktop duplication with Windows' SDR white level, so SDR content is captured as it appears; HDR highlights above SDR white are clipped (bug 9). Window capture is unchanged.
+- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in every capture mode. On such a monitor the desktop is now read through DXGI desktop duplication, and a window through Windows.Graphics.Capture, with Windows' SDR white level, so SDR content is captured as it appears; HDR highlights above SDR white are clipped (bug 9).
 
 ## [3.0.0] - 2026-10-29
 

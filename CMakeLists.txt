@@ -87,7 +87,7 @@ target_link_libraries(lightscreen_core PUBLIC
 if(WIN32)
     target_sources(lightscreen_core PRIVATE tools/taskbar.cpp)
     target_link_libraries(lightscreen_core PUBLIC
-        gdi32 user32 ole32 shell32 shlwapi comctl32 dwmapi winmm uuid d3d11 dxgi)
+        gdi32 user32 ole32 shell32 shlwapi comctl32 dwmapi winmm uuid d3d11 dxgi runtimeobject)
 else()
     target_link_libraries(lightscreen_core PUBLIC X11)
 endif()
