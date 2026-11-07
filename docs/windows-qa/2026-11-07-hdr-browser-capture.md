@@ -1,4 +1,4 @@
-# Browser captured too bright on an HDR monitor (PR #N, bug 9)
+# Browser captured too bright on an HDR monitor (PR #65, bug 9)
 
 On the HDR monitor, with the CI build's `lightscreen-win64` zip from this PR (or `master` once merged). Use a page with colour, such as a GitHub repository page in Chrome, and keep Chrome where the 3.0 build showed the problem.
 
