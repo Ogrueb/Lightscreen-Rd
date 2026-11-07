@@ -4,7 +4,7 @@ Changes in Lightscreen Rd, the maintained fork of Lightscreen by Christian Kaise
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Bug numbers refer to `docs/known-bugs/`.
 
-## [Unreleased]
+## [3.0.1] - 2026-11-07
 
 ### Fixed
 
@@ -72,4 +72,5 @@ First release of the fork, based on upstream Lightscreen 2.5. Settings and scree
 - Release workflow: a tag `v<version>` builds the Windows zip and opens a draft GitHub Release.
 - Decisions, known bugs, status and manual Windows checks are recorded under `docs/`.
 
+[3.0.1]: https://github.com/Ogrueb/Lightscreen-Rd/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Ogrueb/Lightscreen-Rd/releases/tag/v3.0.0

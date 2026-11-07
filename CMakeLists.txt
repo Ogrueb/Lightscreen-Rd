@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(Lightscreen VERSION 3.0 LANGUAGES CXX)
+project(Lightscreen VERSION 3.0.1 LANGUAGES CXX)
 
 # GitHub repository ("owner/name") whose releases the update check reads (renamed with M16).
 set(LIGHTSCREEN_UPDATE_REPO "Ogrueb/Lightscreen-Rd")
