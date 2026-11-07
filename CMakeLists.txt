@@ -40,6 +40,7 @@ add_library(lightscreen_core OBJECT
     dialogs/updaterdialog.cpp dialogs/updaterdialog.h
     lightscreenwindow.cpp lightscreenwindow.h lightscreenwindow.ui
     tools/capturegeometry.cpp tools/capturegeometry.h
+    tools/hdrcapture.cpp tools/hdrcapture.h
     tools/optimizer.cpp tools/optimizer.h
     tools/os.cpp tools/os.h
     tools/screenshot.cpp tools/screenshot.h
@@ -86,7 +87,7 @@ target_link_libraries(lightscreen_core PUBLIC
 if(WIN32)
     target_sources(lightscreen_core PRIVATE tools/taskbar.cpp)
     target_link_libraries(lightscreen_core PUBLIC
-        gdi32 user32 ole32 shell32 shlwapi comctl32 dwmapi winmm uuid)
+        gdi32 user32 ole32 shell32 shlwapi comctl32 dwmapi winmm uuid d3d11 dxgi)
 else()
     target_link_libraries(lightscreen_core PUBLIC X11)
 endif()
