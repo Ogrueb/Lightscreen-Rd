@@ -49,6 +49,14 @@ QPixmap grabScreen(const QString &deviceName);
 // Windows.Graphics.Capture gives. A null pixmap otherwise or on any failure, so the caller keeps PrintWindow.
 QPixmap grabWindow(WId window);
 
+// Diagnostics for bug 9: for each screen and each visible Chrome/Edge window, whether the HDR path applies, the SDR
+// white level, any failed call, and the raw scRGB values Windows hands over (most common colours), so the scaling can
+// be checked against a page of known colours. Captures each screen and browser window once.
+QString report();
+
+// The most common colours and the largest channel value of FP16 RGBA scRGB pixels, one per line.
+QString describeScRgb(const void *pixels, int width, int height, int bytesPerLine);
+
 } // namespace HdrCapture
 
 #endif // HDRCAPTURE_H

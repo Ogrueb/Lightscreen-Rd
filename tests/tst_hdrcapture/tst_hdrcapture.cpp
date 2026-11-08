@@ -121,6 +121,25 @@ private slots:
         QVERIFY(HdrCapture::scRgbToSrgb(data.data(), 1, 1, 8, 0).isNull());
     }
 
+    void describeScRgb()
+    {
+        const auto data = row({ { 2.5f, 2.5f, 2.5f }, { 2.5f, 2.5f, 2.5f }, { 0.5f, 0.25f, 6.0f } });
+        const QString text = HdrCapture::describeScRgb(data.data(), 3, 1, 3 * 8);
+
+        QVERIFY2(text.contains(QStringLiteral("max channel 6")), qPrintable(text));
+        QVERIFY2(text.contains(QStringLiteral("2.5000 2.5000 2.5000  66.7%")), qPrintable(text));
+        QVERIFY2(text.contains(QStringLiteral("0.5000 0.2500 6.0000  33.3%")), qPrintable(text));
+    }
+
+    // Prints what the HDR path sees on this machine (bug 9 diagnostics); with Chrome open on an HDR monitor, run
+    // "tst_hdrcapture report" and send the output.
+    void report()
+    {
+        const QString text = HdrCapture::report();
+        QVERIFY(!text.isEmpty());
+        qInfo().noquote() << "\n" << text;
+    }
+
     // Off Windows, or on an SDR monitor, there is no HDR capture and the caller keeps Qt's grab.
     void grabScreenFallsBack()
     {
