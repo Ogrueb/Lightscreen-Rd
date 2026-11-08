@@ -446,7 +446,7 @@ void Screenshot::grabDesktop()
     for (QScreen *screen : screens) {
         // A monitor in HDR mode is read through desktop duplication, as Qt's grab can return browsers too bright
         // there (bug 9); anything else, or a failure, keeps Qt's grab.
-        QPixmap grab = HdrCapture::grabScreen(screen->name());
+        QPixmap grab = HdrCapture::grabScreen(HdrCapture::deviceName(screen));
 
         if (grab.isNull()) {
             grab = screen->grabWindow(0);

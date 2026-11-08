@@ -21,6 +21,7 @@
 
 #include <QImage>
 #include <QPixmap>
+#include <QScreen>
 #include <QString>
 #include <qwindowdefs.h>
 
@@ -39,10 +40,13 @@ namespace HdrCapture {
 // image, scRGB value sdrWhite becoming white. Values above it clip to white, negative ones (colours outside sRGB) to 0.
 QImage scRgbToSrgb(const void *pixels, int width, int height, int bytesPerLine, float sdrWhite);
 
-// The monitor with this GDI device name (QScreen::name(), "\\.\DISPLAY1") captured through desktop duplication when
+// The monitor with this GDI device name (deviceName(), "\\.\DISPLAY1") captured through desktop duplication when
 // it is in HDR mode. A null pixmap when it is not (SDR monitors keep Qt's grab), on other platforms, or when anything
 // fails, so the caller falls back to Qt's grab.
 QPixmap grabScreen(const QString &deviceName);
+
+// The GDI device name of the monitor a screen is on ("\\.\DISPLAY1" on Windows; QScreen::name() elsewhere).
+QString deviceName(const QScreen *screen);
 
 // The window, when the monitor it is mostly on is in HDR mode, through Windows.Graphics.Capture in FP16 with that
 // monitor's SDR white level: the whole window as Windows renders it (covered or partly off screen too), at the size

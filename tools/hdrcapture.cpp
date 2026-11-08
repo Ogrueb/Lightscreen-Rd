@@ -577,6 +577,28 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
 } // namespace
 #endif
 
+QString HdrCapture::deviceName(const QScreen *screen)
+{
+    if (!screen) {
+        return QString();
+    }
+
+#ifdef Q_OS_WIN
+    // QScreen::name() is the monitor's model name in Qt 6 ("VP2786-4K"), not the GDI device name DXGI uses. A screen's
+    // logical top left is its native top left, so the monitor there is this screen.
+    const QPoint corner = screen->geometry().topLeft();
+    HMONITOR monitor = MonitorFromPoint(POINT { corner.x(), corner.y() }, MONITOR_DEFAULTTONULL);
+    MONITORINFOEXW info = {};
+    info.cbSize = sizeof(info);
+
+    if (monitor && GetMonitorInfoW(monitor, &info)) {
+        return QString::fromWCharArray(info.szDevice);
+    }
+#endif
+
+    return screen->name();
+}
+
 QPixmap HdrCapture::grabScreen(const QString &deviceName)
 {
 #ifdef Q_OS_WIN
@@ -615,17 +637,51 @@ QString HdrCapture::report()
     trace = &lines;
 
     for (QScreen *screen : QGuiApplication::screens()) {
-        lines << QStringLiteral("Screen %1, Qt geometry %2,%3 %4x%5 at %6")
+        const QString device = deviceName(screen);
+        lines << QStringLiteral("Screen %1 (%7), Qt geometry %2,%3 %4x%5 at %6")
                      .arg(screen->name())
                      .arg(screen->geometry().x())
                      .arg(screen->geometry().y())
                      .arg(screen->geometry().width())
                      .arg(screen->geometry().height())
-                     .arg(screen->devicePixelRatio());
+                     .arg(screen->devicePixelRatio())
+                     .arg(device);
+
+        // What Qt's (GDI) grab gives, for comparison: the most common 8-bit colours.
+        {
+            const QImage qtGrab = screen->grabWindow(0).toImage().convertToFormat(QImage::Format_RGB32);
+            QHash<QRgb, int> counts;
+
+            for (int y = 0; y < qtGrab.height(); ++y) {
+                const QRgb *line = reinterpret_cast<const QRgb *>(qtGrab.constScanLine(y));
+
+                for (int x = 0; x < qtGrab.width(); ++x) {
+                    ++counts[line[x] & 0xFFFFFF];
+                }
+            }
+
+            QList<QPair<int, QRgb>> sorted;
+
+            for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+                sorted.append({ it.value(), it.key() });
+            }
+
+            std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            lines << QStringLiteral(" Qt grab %1x%2, most common colours (8-bit):").arg(qtGrab.width()).arg(qtGrab.height());
+
+            for (int i = 0; i < qMin(8, int(sorted.size())); ++i) {
+                const QRgb c = sorted.at(i).second;
+                lines << QStringLiteral("    %1 %2 %3  %4%")
+                             .arg(qRed(c))
+                             .arg(qGreen(c))
+                             .arg(qBlue(c))
+                             .arg(100.0 * sorted.at(i).first / (qint64(qtGrab.width()) * qtGrab.height()), 0, 'f', 1);
+            }
+        }
 
         HdrOutput hdr;
 
-        if (!findHdrOutput(screen->name(), hdr)) {
+        if (!findHdrOutput(device, hdr)) {
             lines << QStringLiteral("  not HDR (or not found): Qt's grab is used");
             continue;
         }
