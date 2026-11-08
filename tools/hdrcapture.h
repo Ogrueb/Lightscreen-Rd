@@ -21,6 +21,7 @@
 
 #include <QImage>
 #include <QPixmap>
+#include <QPoint>
 #include <QScreen>
 #include <QString>
 #include <qwindowdefs.h>
@@ -48,15 +49,22 @@ QPixmap grabScreen(const QString &deviceName);
 // The GDI device name of the monitor a screen is on ("\\.\DISPLAY1" on Windows; QScreen::name() elsewhere).
 QString deviceName(const QScreen *screen);
 
-// The window, when the monitor it is mostly on is in HDR mode, through Windows.Graphics.Capture in FP16 with that
-// monitor's SDR white level: the whole window as Windows renders it (covered or partly off screen too), at the size
-// Windows.Graphics.Capture gives. A null pixmap otherwise or on any failure, so the caller keeps PrintWindow.
+// The window, when the monitor it is mostly on is in HDR mode, through Windows.Graphics.Capture in FP16: the whole
+// window as Windows renders it (covered or partly off screen too), at the size Windows.Graphics.Capture gives. Each
+// window's frame has its own scale, so the frame is calibrated against the composed desktop where the window is
+// visible (matchScale). A null pixmap otherwise or on any failure, so the caller keeps PrintWindow.
 QPixmap grabWindow(WId window);
 
 // Diagnostics for bug 9: for each screen and each visible Chrome/Edge window, whether the HDR path applies, the SDR
 // white level, any failed call, and the raw scRGB values Windows hands over (most common colours), so the scaling can
 // be checked against a page of known colours. Captures each screen and browser window once.
 QString report();
+
+// How much brighter the desktop is than the window placed on it at offset (both FP16 RGBA scRGB): desktop / window,
+// from the pixels where the two agree on one factor. 0 when they overlap too little or more than half of the
+// compared pixels disagree (the window is mostly covered).
+float matchScale(const void *window, int width, int height, int bytesPerLine, const void *desktop, int desktopWidth,
+                 int desktopHeight, int desktopBytesPerLine, const QPoint &offset);
 
 // The most common colours and the largest channel value of FP16 RGBA scRGB pixels, one per line.
 QString describeScRgb(const void *pixels, int width, int height, int bytesPerLine);

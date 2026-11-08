@@ -121,6 +121,64 @@ private slots:
         QVERIFY(HdrCapture::scRgbToSrgb(data.data(), 1, 1, 8, 0).isNull());
     }
 
+    // Window capture calibration: a window frame with its own scale (white at 2.0) placed on a desktop where the same
+    // content is 2.5 times brighter (white at 5.0), partly covered by something else.
+    void matchScale()
+    {
+        const int width = 40;
+        const int height = 30;
+        std::vector<qfloat16> window(size_t(width) * height * 4);
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const float value = (x + y) % 3 == 0 ? 0.6f : 2.0f;
+                qfloat16 *p = window.data() + (size_t(y) * width + x) * 4;
+                p[0] = p[1] = p[2] = qfloat16(value);
+                p[3] = qfloat16(1.0f);
+            }
+        }
+
+        const int desktopWidth = 100;
+        const int desktopHeight = 80;
+        const QPoint offset(30, 20);
+        // Behind it, other content: a gradient.
+        std::vector<qfloat16> desktop(size_t(desktopWidth) * desktopHeight * 4);
+
+        for (int y = 0; y < desktopHeight; ++y) {
+            for (int x = 0; x < desktopWidth; ++x) {
+                qfloat16 *d = desktop.data() + (size_t(y) * desktopWidth + x) * 4;
+                d[0] = d[1] = d[2] = qfloat16(0.05f * float(x + y + 1));
+                d[3] = qfloat16(1.0f);
+            }
+        }
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                qfloat16 *d = desktop.data() + (size_t(y + offset.y()) * desktopWidth + x + offset.x()) * 4;
+                const qfloat16 *w = window.data() + (size_t(y) * width + x) * 4;
+                // A third of the window is covered by another window (a different value).
+                const bool covered = x < width / 3;
+
+                for (int c = 0; c < 3; ++c) {
+                    d[c] = covered ? qfloat16(4.0f) : qfloat16(float(w[c]) * 2.5f);
+                }
+            }
+        }
+
+        const float scale = HdrCapture::matchScale(window.data(), width, height, width * 8, desktop.data(), desktopWidth,
+                                                   desktopHeight, desktopWidth * 8, offset);
+        QVERIFY2(qAbs(scale - 2.5f) < 0.01f, qPrintable(QString::number(scale)));
+
+        // The same window placed over the gradient, where nothing matches: no consistent factor.
+        QCOMPARE(HdrCapture::matchScale(window.data(), width, height, width * 8, desktop.data(), desktopWidth,
+                                        desktopHeight, desktopWidth * 8, QPoint(0, 0)),
+                 0.0f);
+        // Entirely off the desktop.
+        QCOMPARE(HdrCapture::matchScale(window.data(), width, height, width * 8, desktop.data(), desktopWidth,
+                                        desktopHeight, desktopWidth * 8, QPoint(200, 0)),
+                 0.0f);
+    }
+
     void describeScRgb()
     {
         const auto data = row({ { 2.5f, 2.5f, 2.5f }, { 2.5f, 2.5f, 2.5f }, { 0.5f, 0.25f, 6.0f } });

@@ -22,10 +22,12 @@
 #ifdef Q_OS_WIN
     #include <qt_windows.h>
     #include <d3d11.h>
+    #include <dwmapi.h>
     #include <dxgi1_6.h>
     #include <roapi.h>
     #include <windows.graphics.capture.h>
     #include <windows.graphics.capture.interop.h>
+    #include <windows.security.authorization.appcapabilityaccess.h>
     #include <windows.graphics.directx.direct3d11.interop.h>
     #include <wrl/client.h>
     #include <wrl/wrappers/corewrappers.h>
@@ -36,6 +38,7 @@
 #include <QFloat16>
 #include <QGuiApplication>
 #include <QHash>
+#include <QRect>
 #include <QScreen>
 #include <QStringList>
 #include <QTransform>
@@ -165,6 +168,92 @@ QString HdrCapture::describeScRgb(const void *pixels, int width, int height, int
     }
 
     return lines.join(QLatin1Char('\n'));
+}
+
+float HdrCapture::matchScale(const void *window, int width, int height, int bytesPerLine, const void *desktop,
+                             int desktopWidth, int desktopHeight, int desktopBytesPerLine, const QPoint &offset)
+{
+    if (!window || !desktop || width <= 0 || height <= 0 || desktopWidth <= 0 || desktopHeight <= 0
+        || bytesPerLine < width * 8 || desktopBytesPerLine < desktopWidth * 8) {
+        return 0;
+    }
+
+    // The overlap of the window, placed at offset, with the desktop, in window coordinates.
+    const QRect overlap = QRect(0, 0, width, height) & QRect(-offset, QSize(desktopWidth, desktopHeight));
+
+    if (overlap.isEmpty()) {
+        return 0;
+    }
+
+    // Per pixel, desktop / window brightness, binned on a log scale (1/32 of a stop); covered or changed pixels scatter
+    // across the bins, the visible part of the window piles up in one. Dark pixels are too noisy to count.
+    constexpr int BinsPerStop = 32;
+    constexpr int Stops = 8; // ratios from 1/256 to 256
+    std::vector<int> bins(size_t(2 * Stops * BinsPerStop + 1), 0);
+    std::vector<double> sums(bins.size(), 0);
+    std::vector<float> windowRow(size_t(width) * 4);
+    std::vector<float> desktopRow(size_t(desktopWidth) * 4);
+    int compared = 0;
+
+    for (int y = overlap.top(); y <= overlap.bottom(); y += 2) {
+        qFloatFromFloat16(windowRow.data(),
+                          reinterpret_cast<const qfloat16 *>(static_cast<const uchar *>(window) + qsizetype(y) * bytesPerLine),
+                          qsizetype(width) * 4);
+        qFloatFromFloat16(desktopRow.data(),
+                          reinterpret_cast<const qfloat16 *>(static_cast<const uchar *>(desktop)
+                                                             + qsizetype(y + offset.y()) * desktopBytesPerLine),
+                          qsizetype(desktopWidth) * 4);
+
+        for (int x = overlap.left(); x <= overlap.right(); x += 2) {
+            const float *w = windowRow.data() + x * 4;
+            const float *d = desktopRow.data() + (x + offset.x()) * 4;
+            const float windowLight = w[0] + w[1] + w[2];
+            const float desktopLight = d[0] + d[1] + d[2];
+
+            if (!(windowLight > 0.15f) || !(desktopLight > 0)) {
+                continue;
+            }
+
+            const double ratio = double(desktopLight) / windowLight;
+            const int bin = int(std::lround(std::log2(ratio) * BinsPerStop)) + Stops * BinsPerStop;
+
+            if (bin < 0 || bin >= int(bins.size())) {
+                continue;
+            }
+
+            ++bins[size_t(bin)];
+            sums[size_t(bin)] += ratio;
+            ++compared;
+        }
+    }
+
+    if (compared < 50) {
+        return 0;
+    }
+
+    // The fullest bin with its neighbours (a ratio near a bin edge splits across two).
+    int best = 0;
+
+    for (int i = 1; i < int(bins.size()); ++i) {
+        if (bins[size_t(i)] > bins[size_t(best)]) {
+            best = i;
+        }
+    }
+
+    int count = 0;
+    double sum = 0;
+
+    for (int i = qMax(0, best - 1); i <= qMin(int(bins.size()) - 1, best + 1); ++i) {
+        count += bins[size_t(i)];
+        sum += sums[size_t(i)];
+    }
+
+    // Most of what was compared has to agree, or the window is mostly covered and the result would be a guess.
+    if (count * 2 < compared) {
+        return 0;
+    }
+
+    return float(sum / count);
 }
 
 #ifdef Q_OS_WIN
@@ -308,15 +397,26 @@ bool findHdrOutput(const QString &deviceName, HdrOutput &result)
     return false;
 }
 
-// Copies an FP16 texture to the CPU and converts it; only the top left contentSize when it is given.
-QImage readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Texture2D *texture, float sdrWhite,
-                   QSize contentSize = QSize())
+// FP16 RGBA pixels copied off the GPU, rows width * 8 bytes apart.
+struct Fp16Image {
+    std::vector<qfloat16> pixels;
+    int width = 0;
+    int height = 0;
+
+    bool isNull() const { return pixels.empty(); }
+    int bytesPerLine() const { return width * 8; }
+};
+
+// Copies an FP16 texture to the CPU; only the top left contentSize when it is given.
+Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Texture2D *texture,
+                      QSize contentSize = QSize())
 {
     D3D11_TEXTURE2D_DESC description;
     texture->GetDesc(&description);
 
     if (description.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
-        return QImage();
+        note(QStringLiteral("  texture format %1 is not FP16").arg(int(description.Format)));
+        return Fp16Image();
     }
 
     description.Usage = D3D11_USAGE_STAGING;
@@ -329,7 +429,7 @@ QImage readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Tex
     ComPtr<ID3D11Texture2D> staging;
 
     if (TRACE_FAILED(device->CreateTexture2D(&description, nullptr, &staging))) {
-        return QImage();
+        return Fp16Image();
     }
 
     context->CopyResource(staging.Get(), texture);
@@ -337,47 +437,60 @@ QImage readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Tex
     D3D11_MAPPED_SUBRESOURCE mapped;
 
     if (TRACE_FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-        return QImage();
+        return Fp16Image();
     }
 
-    int width = int(description.Width);
-    int height = int(description.Height);
+    Fp16Image image;
+    image.width = int(description.Width);
+    image.height = int(description.Height);
 
     if (contentSize.isValid()) {
-        width = qMin(width, contentSize.width());
-        height = qMin(height, contentSize.height());
+        image.width = qMin(image.width, contentSize.width());
+        image.height = qMin(image.height, contentSize.height());
     }
+
+    image.pixels.resize(size_t(image.width) * image.height * 4);
+
+    for (int y = 0; y < image.height; ++y) {
+        std::memcpy(image.pixels.data() + size_t(y) * image.width * 4,
+                    static_cast<const uchar *>(mapped.pData) + size_t(y) * mapped.RowPitch, size_t(image.width) * 8);
+    }
+
+    context->Unmap(staging.Get(), 0);
 
     if (trace) {
-        note(QStringLiteral("  texture %1x%2, used %3x%4, divided by %5")
-                 .arg(description.Width).arg(description.Height).arg(width).arg(height).arg(sdrWhite));
-        note(HdrCapture::describeScRgb(mapped.pData, width, height, int(mapped.RowPitch)));
+        note(QStringLiteral("  texture %1x%2, used %3x%4").arg(description.Width).arg(description.Height)
+                 .arg(image.width).arg(image.height));
+        note(HdrCapture::describeScRgb(image.pixels.data(), image.width, image.height, image.bytesPerLine()));
     }
 
-    QImage image = HdrCapture::scRgbToSrgb(mapped.pData, width, height, int(mapped.RowPitch), sdrWhite);
-    context->Unmap(staging.Get(), 0);
     return image;
 }
 
-QPixmap duplicate(const HdrOutput &hdr)
+// The output's composed desktop in FP16, in the panel's own orientation (see rotation).
+Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
 {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
 
     if (TRACE_FAILED(D3D11CreateDevice(hdr.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
-                                 D3D11_SDK_VERSION, &device, nullptr, &context))) {
-        return QPixmap();
+                                       D3D11_SDK_VERSION, &device, nullptr, &context))) {
+        return Fp16Image();
     }
 
     const DXGI_FORMAT formats[] = { DXGI_FORMAT_R16G16B16A16_FLOAT };
     ComPtr<IDXGIOutputDuplication> duplication;
 
     if (TRACE_FAILED(hdr.output->DuplicateOutput1(device.Get(), 0, 1, formats, &duplication))) {
-        return QPixmap();
+        return Fp16Image();
     }
 
+    DXGI_OUTDUPL_DESC duplicationDescription;
+    duplication->GetDesc(&duplicationDescription);
+    *rotation = duplicationDescription.Rotation;
+
     // The first frame of a new duplication holds the whole desktop; one that only moved the pointer has no image.
-    QImage image;
+    Fp16Image image;
 
     for (int attempt = 0; attempt < 5 && image.isNull(); ++attempt) {
         DXGI_OUTDUPL_FRAME_INFO info = {};
@@ -390,7 +503,7 @@ QPixmap duplicate(const HdrOutput &hdr)
         }
 
         if (TRACE_FAILED(result)) {
-            return QPixmap();
+            return Fp16Image();
         }
 
         ComPtr<ID3D11Texture2D> texture;
@@ -399,21 +512,30 @@ QPixmap duplicate(const HdrOutput &hdr)
                  .arg(info.AccumulatedFrames));
 
         if (info.LastPresentTime.QuadPart != 0 && SUCCEEDED(resource.As(&texture))) {
-            image = readTexture(device.Get(), context.Get(), texture.Get(), hdr.sdrWhite);
+            image = readTexture(device.Get(), context.Get(), texture.Get());
         }
 
         duplication->ReleaseFrame();
     }
 
-    if (image.isNull()) {
+    return image;
+}
+
+QPixmap duplicate(const HdrOutput &hdr)
+{
+    DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
+    const Fp16Image frame = duplicateFrame(hdr, &rotation);
+
+    if (frame.isNull()) {
         return QPixmap();
     }
 
-    // The frame is in the panel's own orientation; turn it to the desktop's.
-    DXGI_OUTDUPL_DESC duplicationDescription;
-    duplication->GetDesc(&duplicationDescription);
+    QImage image = HdrCapture::scRgbToSrgb(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(),
+                                           hdr.sdrWhite);
+    note(QStringLiteral("  divided by the SDR white level %1").arg(hdr.sdrWhite));
 
-    switch (duplicationDescription.Rotation) {
+    // The frame is in the panel's own orientation; turn it to the desktop's.
+    switch (rotation) {
     case DXGI_MODE_ROTATION_ROTATE90:
         image = image.transformed(QTransform().rotate(90));
         break;
@@ -447,41 +569,103 @@ void closeObject(const ComPtr<T> &object)
     }
 }
 
-// One frame of the window through Windows.Graphics.Capture (Windows 10 1903 and later), in FP16.
-QPixmap captureWindow(HWND window, const HdrOutput &hdr)
+// Windows 11 draws a yellow border around a window being captured unless the app has asked for borderless capture;
+// asked once per run. Windows 10 has no such request (and no way to hide the border).
+void requestBorderlessCapture()
+{
+    static bool asked = false;
+
+    if (asked) {
+        return;
+    }
+
+    asked = true;
+
+    namespace Capture = ABI::Windows::Graphics::Capture;
+    using AccessStatus = ABI::Windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+    using Microsoft::WRL::Wrappers::HStringReference;
+
+    ComPtr<Capture::IGraphicsCaptureAccessStatics> access;
+
+    if (TRACE_FAILED(RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureAccess).Get(),
+                                            IID_PPV_ARGS(&access)))) {
+        return;
+    }
+
+    ComPtr<ABI::Windows::Foundation::IAsyncOperation<AccessStatus>> operation;
+
+    if (TRACE_FAILED(access->RequestAccessAsync(Capture::GraphicsCaptureAccessKind_Borderless, &operation))) {
+        return;
+    }
+
+    ComPtr<ABI::Windows::Foundation::IAsyncInfo> info;
+
+    if (TRACE_FAILED(operation.As(&info))) {
+        return;
+    }
+
+    ABI::Windows::Foundation::AsyncStatus status = ABI::Windows::Foundation::AsyncStatus::Started;
+
+    for (int wait = 0; wait < 100 && status == ABI::Windows::Foundation::AsyncStatus::Started; ++wait) {
+        if (TRACE_FAILED(info->get_Status(&status))) {
+            return;
+        }
+
+        if (status == ABI::Windows::Foundation::AsyncStatus::Started) {
+            Sleep(10);
+        }
+    }
+
+    AccessStatus result = AccessStatus::AppCapabilityAccessStatus_DeniedBySystem;
+
+    if (status == ABI::Windows::Foundation::AsyncStatus::Completed) {
+        operation->GetResults(&result);
+    }
+
+    note(QStringLiteral("  borderless capture: async status %1, access %2").arg(int(status)).arg(int(result)));
+}
+
+// One frame of the window through Windows.Graphics.Capture (Windows 10 1903 and later), in FP16. Its scale is the
+// window's own: an SDR window comes with white at some level of Windows' choosing (2.0 on the owner's 400-nit
+// setting), a browser with its own HDR surface at another (5.0 there), so captureWindow calibrates it.
+Fp16Image windowFrame(HWND window, const HdrOutput &hdr)
 {
     namespace Capture = ABI::Windows::Graphics::Capture;
     namespace WinRtD3D = ABI::Windows::Graphics::DirectX::Direct3D11;
     using Microsoft::WRL::Wrappers::HStringReference;
 
+    requestBorderlessCapture();
+
     ComPtr<IGraphicsCaptureItemInterop> interop;
 
     if (TRACE_FAILED(RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem).Get(),
-                                      IID_PPV_ARGS(&interop)))) {
-        return QPixmap();
+                                            IID_PPV_ARGS(&interop)))) {
+        return Fp16Image();
     }
 
     ComPtr<Capture::IGraphicsCaptureItem> item;
 
     if (TRACE_FAILED(interop->CreateForWindow(window, IID_PPV_ARGS(&item)))) {
-        return QPixmap();
+        return Fp16Image();
     }
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
 
-    if (TRACE_FAILED(D3D11CreateDevice(hdr.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                 nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) {
-        return QPixmap();
+    if (TRACE_FAILED(D3D11CreateDevice(hdr.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &device,
+                                       nullptr, &context))) {
+        return Fp16Image();
     }
 
     ComPtr<IDXGIDevice> dxgiDevice;
     ComPtr<IInspectable> inspectable;
     ComPtr<WinRtD3D::IDirect3DDevice> winrtDevice;
 
-    if (TRACE_FAILED(device.As(&dxgiDevice)) || TRACE_FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), &inspectable))
+    if (TRACE_FAILED(device.As(&dxgiDevice))
+        || TRACE_FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), &inspectable))
         || TRACE_FAILED(inspectable.As(&winrtDevice))) {
-        return QPixmap();
+        return Fp16Image();
     }
 
     ComPtr<Capture::IDirect3D11CaptureFramePoolStatics2> poolStatics;
@@ -489,29 +673,30 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
     if (TRACE_FAILED(RoGetActivationFactory(
             HStringReference(RuntimeClass_Windows_Graphics_Capture_Direct3D11CaptureFramePool).Get(),
             IID_PPV_ARGS(&poolStatics)))) {
-        return QPixmap();
+        return Fp16Image();
     }
 
     ABI::Windows::Graphics::SizeInt32 size = {};
     item->get_Size(&size);
 
     if (size.Width <= 0 || size.Height <= 0) {
-        return QPixmap();
+        note(QStringLiteral("  empty capture item"));
+        return Fp16Image();
     }
 
     ComPtr<Capture::IDirect3D11CaptureFramePool> pool;
 
     if (TRACE_FAILED(poolStatics->CreateFreeThreaded(winrtDevice.Get(),
-                                               ABI::Windows::Graphics::DirectX::DirectXPixelFormat_R16G16B16A16Float, 1,
-                                               size, &pool))) {
-        return QPixmap();
+                                                     ABI::Windows::Graphics::DirectX::DirectXPixelFormat_R16G16B16A16Float,
+                                                     1, size, &pool))) {
+        return Fp16Image();
     }
 
     ComPtr<Capture::IGraphicsCaptureSession> session;
 
     if (TRACE_FAILED(pool->CreateCaptureSession(item.Get(), &session))) {
         closeObject(pool);
-        return QPixmap();
+        return Fp16Image();
     }
 
     // No pointer in the capture (Windows 10 2004 and later), and no yellow border where Windows allows that.
@@ -524,12 +709,12 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
     ComPtr<Capture::IGraphicsCaptureSession3> session3;
 
     if (SUCCEEDED(session.As(&session3))) {
-        session3->put_IsBorderRequired(false);
+        TRACE_FAILED(session3->put_IsBorderRequired(false));
     }
 
-    QImage image;
+    Fp16Image image;
 
-    if (SUCCEEDED(session->StartCapture())) {
+    if (!TRACE_FAILED(session->StartCapture())) {
         // A free-threaded pool fills without a message loop; the first frame normally arrives within a few
         // milliseconds. A minimized window never sends one.
         for (int wait = 0; wait < 100 && image.isNull(); ++wait) {
@@ -555,9 +740,9 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
             frame->get_ContentSize(&contentSize);
             note(QStringLiteral("  frame content %1x%2").arg(contentSize.Width).arg(contentSize.Height));
 
-            if (SUCCEEDED(frame->get_Surface(&surface)) && SUCCEEDED(surface.As(&access))
-                && SUCCEEDED(access->GetInterface(IID_PPV_ARGS(&texture)))) {
-                image = readTexture(device.Get(), context.Get(), texture.Get(), hdr.sdrWhite,
+            if (!TRACE_FAILED(frame->get_Surface(&surface)) && !TRACE_FAILED(surface.As(&access))
+                && !TRACE_FAILED(access->GetInterface(IID_PPV_ARGS(&texture)))) {
+                image = readTexture(device.Get(), context.Get(), texture.Get(),
                                     QSize(contentSize.Width, contentSize.Height));
             }
 
@@ -571,7 +756,60 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
 
     closeObject(session);
     closeObject(pool);
+    return image;
+}
 
+// The window through Windows.Graphics.Capture, brought to the desktop's brightness: the part of the window that is on
+// screen is compared with the composed desktop (which has SDR white at the SDR white level, see duplicate()), and the
+// frame is scaled by what that comparison finds. Null when nothing of the window can be compared (covered, off
+// screen, rotated panel) or the comparison is not consistent, so the caller keeps PrintWindow.
+QPixmap captureWindow(HWND window, const HdrOutput &hdr)
+{
+    const Fp16Image frame = windowFrame(window, hdr);
+
+    if (frame.isNull()) {
+        return QPixmap();
+    }
+
+    DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
+    note(QStringLiteral(" Desktop duplication, for comparison:"));
+    const Fp16Image desktop = duplicateFrame(hdr, &rotation);
+
+    if (desktop.isNull() || (rotation != DXGI_MODE_ROTATION_IDENTITY && rotation != DXGI_MODE_ROTATION_UNSPECIFIED)) {
+        note(QStringLiteral("  no desktop frame to compare with (rotation %1)").arg(int(rotation)));
+        return QPixmap();
+    }
+
+    // Where the frame sits on this output: at the visible frame DWM reports, or at the window rectangle when the
+    // frame has that rectangle's size.
+    RECT bounds;
+    RECT full;
+    GetWindowRect(window, &full);
+
+    if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) {
+        bounds = full;
+    }
+
+    if (frame.width == full.right - full.left && frame.height == full.bottom - full.top) {
+        bounds = full;
+    }
+
+    const RECT &origin = hdr.description.DesktopCoordinates;
+    const QPoint offset(bounds.left - origin.left, bounds.top - origin.top);
+    const float scale = HdrCapture::matchScale(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(),
+                                               desktop.pixels.data(), desktop.width, desktop.height,
+                                               desktop.bytesPerLine(), offset);
+    note(QStringLiteral("  window at %1,%2 on the output; desktop / window = %3")
+             .arg(offset.x()).arg(offset.y()).arg(scale));
+
+    if (!(scale > 0)) {
+        return QPixmap();
+    }
+
+    const float white = hdr.sdrWhite / scale;
+    note(QStringLiteral("  divided by %1").arg(white));
+    const QImage image = HdrCapture::scRgbToSrgb(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(),
+                                                 white);
     return image.isNull() ? QPixmap() : QPixmap::fromImage(image);
 }
 } // namespace
