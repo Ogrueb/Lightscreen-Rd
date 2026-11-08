@@ -972,8 +972,11 @@ QString HdrCapture::report()
             timer.start();
             const QPixmap grab = captureWindow(window, hdr);
             const qint64 hdrTime = timer.elapsed();
+            QStringList *const saved = trace;
+            trace = nullptr; // the whole path again, untraced
             timer.restart();
             os::grabWindow(WId(window));
+            trace = saved;
             note(grab.isNull() ? QStringLiteral("  -> failed, PrintWindow is used") : QStringLiteral("  -> used"));
             note(QStringLiteral("  time: %1 ms (whole os::grabWindow, HDR path included: %2 ms)").arg(hdrTime).arg(timer.elapsed()));
             return TRUE;
