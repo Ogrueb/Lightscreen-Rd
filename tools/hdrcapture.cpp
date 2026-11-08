@@ -34,7 +34,9 @@
 #endif
 
 #include <tools/hdrcapture.h>
+#include <tools/os.h>
 
+#include <QElapsedTimer>
 #include <QFloat16>
 #include <QGuiApplication>
 #include <QHash>
@@ -925,8 +927,14 @@ QString HdrCapture::report()
         }
 
         lines << QStringLiteral(" Desktop duplication:");
+        QElapsedTimer timer;
+        timer.start();
         const QPixmap grab = duplicate(hdr);
+        const qint64 hdrTime = timer.elapsed();
+        timer.restart();
+        screen->grabWindow(0);
         lines << (grab.isNull() ? QStringLiteral("  -> failed, Qt's grab is used") : QStringLiteral("  -> used"));
+        lines << QStringLiteral("  time: %1 ms (Qt's grab: %2 ms)").arg(hdrTime).arg(timer.elapsed());
     }
 
     // Every visible Chromium browser, Explorer and Notepad window: what Windows.Graphics.Capture hands over, so a
@@ -960,8 +968,14 @@ QString HdrCapture::report()
             }
 
             note(QStringLiteral(" Windows.Graphics.Capture:"));
+            QElapsedTimer timer;
+            timer.start();
             const QPixmap grab = captureWindow(window, hdr);
+            const qint64 hdrTime = timer.elapsed();
+            timer.restart();
+            os::grabWindow(WId(window));
             note(grab.isNull() ? QStringLiteral("  -> failed, PrintWindow is used") : QStringLiteral("  -> used"));
+            note(QStringLiteral("  time: %1 ms (whole os::grabWindow, HDR path included: %2 ms)").arg(hdrTime).arg(timer.elapsed()));
             return TRUE;
         },
         0);
