@@ -491,13 +491,17 @@ Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
     duplication->GetDesc(&duplicationDescription);
     *rotation = duplicationDescription.Rotation;
 
-    // The first frame of a new duplication holds the whole desktop; one that only moved the pointer has no image.
+    // The first frame of a new duplication normally comes at once and holds the whole desktop (LastPresentTime set).
+    // The duplicated surface is the current desktop on every successful acquire, so if no frame reports a present
+    // (a desktop where nothing redraws), the last one acquired is used rather than waiting longer or falling back to
+    // GDI, which in a browser's HDR state is the bug itself. At most 3 x 100 ms.
     Fp16Image image;
+    Fp16Image unchanged;
 
-    for (int attempt = 0; attempt < 5 && image.isNull(); ++attempt) {
+    for (int attempt = 0; attempt < 3 && image.isNull(); ++attempt) {
         DXGI_OUTDUPL_FRAME_INFO info = {};
         ComPtr<IDXGIResource> resource;
-        const HRESULT result = duplication->AcquireNextFrame(500, &info, &resource);
+        const HRESULT result = duplication->AcquireNextFrame(100, &info, &resource);
 
         if (result == DXGI_ERROR_WAIT_TIMEOUT) {
             note(QStringLiteral("  AcquireNextFrame: timeout"));
@@ -513,11 +517,22 @@ Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
                  .arg(info.LastPresentTime.QuadPart)
                  .arg(info.AccumulatedFrames));
 
-        if (info.LastPresentTime.QuadPart != 0 && SUCCEEDED(resource.As(&texture))) {
-            image = readTexture(device.Get(), context.Get(), texture.Get());
+        if (SUCCEEDED(resource.As(&texture))) {
+            Fp16Image frame = readTexture(device.Get(), context.Get(), texture.Get());
+
+            if (info.LastPresentTime.QuadPart != 0) {
+                image = std::move(frame);
+            } else {
+                unchanged = std::move(frame);
+            }
         }
 
         duplication->ReleaseFrame();
+    }
+
+    if (image.isNull() && !unchanged.isNull()) {
+        note(QStringLiteral("  no frame reported a present; using the last one acquired"));
+        return unchanged;
     }
 
     return image;
@@ -572,16 +587,15 @@ void closeObject(const ComPtr<T> &object)
 }
 
 // Windows 11 draws a yellow border around a window being captured unless the app has asked for borderless capture;
-// asked once per run. Windows 10 has no such request (and no way to hide the border).
+// asked until Windows answers once per run. Windows 10 has no such request (and no way to hide the border).
 void requestBorderlessCapture()
 {
-    static bool asked = false;
+    // Asked again on a later capture until one request completes (a first call can time out while the system is busy).
+    static bool answered = false;
 
-    if (asked) {
+    if (answered) {
         return;
     }
-
-    asked = true;
 
     namespace Capture = ABI::Windows::Graphics::Capture;
     using AccessStatus = ABI::Windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
@@ -591,12 +605,14 @@ void requestBorderlessCapture()
 
     if (TRACE_FAILED(RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureAccess).Get(),
                                             IID_PPV_ARGS(&access)))) {
+        answered = true; // Windows 10: no such request
         return;
     }
 
     ComPtr<ABI::Windows::Foundation::IAsyncOperation<AccessStatus>> operation;
 
     if (TRACE_FAILED(access->RequestAccessAsync(Capture::GraphicsCaptureAccessKind_Borderless, &operation))) {
+        answered = true;
         return;
     }
 
@@ -622,6 +638,9 @@ void requestBorderlessCapture()
 
     if (status == ABI::Windows::Foundation::AsyncStatus::Completed) {
         operation->GetResults(&result);
+        answered = true;
+    } else if (status != ABI::Windows::Foundation::AsyncStatus::Started) {
+        answered = true; // failed or cancelled: asking again will not change it
     }
 
     note(QStringLiteral("  borderless capture: async status %1, access %2").arg(int(status)).arg(int(result)));

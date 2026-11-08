@@ -179,6 +179,56 @@ private slots:
                  0.0f);
     }
 
+    // Chrome in its HDR state: the window frame is already on the desktop's scale (white 5.0 in both), factor 1.
+    void matchScale_sameScale()
+    {
+        const int width = 30;
+        const int height = 20;
+        std::vector<qfloat16> window(size_t(width) * height * 4);
+
+        for (size_t i = 0; i < window.size(); i += 4) {
+            const float value = (i / 4) % 5 == 0 ? 0.12f : 5.0f; // dark text on a white page
+            window[i] = window[i + 1] = window[i + 2] = qfloat16(value);
+            window[i + 3] = qfloat16(1.0f);
+        }
+
+        const float scale = HdrCapture::matchScale(window.data(), width, height, width * 8, window.data(), width, height,
+                                                   width * 8, QPoint(0, 0));
+        QVERIFY2(qAbs(scale - 1.0f) < 0.01f, qPrintable(QString::number(scale)));
+    }
+
+    // A dark-themed window: only its text is bright enough to compare. With enough of it the factor is found; a
+    // nearly black window has too little to compare and is left to PrintWindow (0).
+    void matchScale_darkWindow()
+    {
+        const int width = 200;
+        const int height = 100;
+        auto make = [&](int textEvery, float factor) {
+            std::vector<qfloat16> pixels(size_t(width) * height * 4);
+
+            for (int i = 0; i < width * height; ++i) {
+                const float value = (i % textEvery == 0 ? 1.6f : 0.02f) * factor;
+                pixels[size_t(i) * 4] = pixels[size_t(i) * 4 + 1] = pixels[size_t(i) * 4 + 2] = qfloat16(value);
+                pixels[size_t(i) * 4 + 3] = qfloat16(1.0f);
+            }
+
+            return pixels;
+        };
+
+        // Bright pixels at odd positions would be skipped by the every-second-pixel sampling, so use an odd stride.
+        const auto window = make(7, 1.0f);
+        const auto desktop = make(7, 2.5f);
+        const float scale = HdrCapture::matchScale(window.data(), width, height, width * 8, desktop.data(), width,
+                                                   height, width * 8, QPoint(0, 0));
+        QVERIFY2(qAbs(scale - 2.5f) < 0.01f, qPrintable(QString::number(scale)));
+
+        const auto blackWindow = make(5001, 1.0f);
+        const auto blackDesktop = make(5001, 2.5f);
+        QCOMPARE(HdrCapture::matchScale(blackWindow.data(), width, height, width * 8, blackDesktop.data(), width, height,
+                                        width * 8, QPoint(0, 0)),
+                 0.0f);
+    }
+
     void describeScRgb()
     {
         const auto data = row({ { 2.5f, 2.5f, 2.5f }, { 2.5f, 2.5f, 2.5f }, { 0.5f, 0.25f, 6.0f } });

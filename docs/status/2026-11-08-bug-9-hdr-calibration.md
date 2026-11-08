@@ -7,8 +7,14 @@ The owner tested the 3.0.1 draft on the HDR monitor (Windows 11, SDR content bri
 - **Report 2 (two runs):**
   - The composed desktop (desktop duplication) has SDR white at exactly the SDR white level (5.0), for Explorer and Chrome alike. Dividing by it is right in both of Chrome's states.
   - Qt's GDI grab is right in Chrome's normal state but too bright in the other (GitHub's dark text `0.12` scRGB came out 97 to 131 instead of about 40). That is bug 9 as reported.
-  - Windows.Graphics.Capture gives each window at its own scale: Explorer white 2.0, Chrome white 2.0 in its normal state and 5.0 in the other. 3.0.1 divided every window by 5.0, hence 2.5 times too dark.
+  - Windows.Graphics.Capture gives each window at its own scale: Explorer white 2.0, Chrome white 2.0 in its normal state and 5.0 in the other. 3.0.1 divided every window by 5.0, hence 2.5 times too dark. The 2.0 for SDR windows is measured, not explained (no Windows documentation found); the calibration does not depend on it.
 - **Window capture fix:** `captureWindow` now takes the window frame and a desktop duplication frame. `HdrCapture::matchScale` compares the two over the window's visible part (per pixel, binned on a log scale; at least half the compared pixels must agree) and the frame is divided by SDR white / that ratio. When it cannot be compared (mostly covered, off screen, rotated panel), PrintWindow runs as before. Nothing about the display is hard-coded (owner's rule).
 - **Yellow border:** on Windows 11, `IsBorderRequired(false)` is ignored until the app has asked `GraphicsCaptureAccess::RequestAccessAsync(Borderless)`; that is now asked once per run.
 - **Tests:** `tst_hdrcapture` gains `matchScale` (a window 2.5 times dimmer than the desktop, a third covered, plus no match over other content and off the desktop) and `describeScRgb`. A window wholly covered by a single flat colour would match a wrong factor; noted, not handled.
+- **Review follow-ups (same PR):**
+  - Desktop duplication waited up to a second on a static desktop. It now tries `AcquireNextFrame` 3 times at 100 ms, uses the first frame with a present, and otherwise the last frame acquired.
+  - The borderless request is retried on a later capture while Windows has not answered, instead of once per run.
+  - New tests `matchScale_sameScale` (ratio 1) and `matchScale_darkWindow` (sparse light text on a dark window, and too few pixels to compare).
+  - The QA check says how to force Chrome's HDR state.
+  - Deferred: cropping the desktop frame instead of WGC when the window is uncovered; a shared D3D device and copying only the window's region; a QA gate in the release workflow; handling a desktop in the scRGB colour space (only G2084 is treated as HDR).
 - **Release:** the 3.0.1 draft and its tag were made from `4986f90`, before these fixes. See the owner's decision in the thread for whether 3.0.1 is re-tagged or this becomes 3.0.2.

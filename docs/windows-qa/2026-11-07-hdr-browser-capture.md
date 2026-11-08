@@ -2,6 +2,8 @@
 
 On the HDR monitor, with the CI build's `lightscreen-win64` zip from PR #67 (or `master` once merged). Use a page with colour, such as a GitHub repository page in Chrome, and check both of Chrome's states: `lightscreen --hdr-report` shows which one Chrome is in (its window frame with white at 2.0, or at the SDR white level when it is in the state that 3.0.0 captured too bright).
 
+To put Chrome in that other state on purpose, play an HDR video in it (for example a YouTube clip marked HDR, at a quality with "HDR" in its name) and leave the tab open; run `lightscreen --hdr-report` again and check that the Chrome window's white is now at the SDR white level (5.0 at 400 nits) instead of 2.0. Starting Chrome with `--force-color-profile=scrgb-linear` may also do it (not verified). If neither works, check whichever state Chrome is in and say so.
+
 1. Capture the whole screen, then the current monitor, then an area over the Chrome tab. Each file matches the screen: no washed-out colours, no red, cyan or yellow fringes on text and icons. Other windows in the full-screen capture look as before.
 2. Change Windows' "SDR content brightness" (Settings > System > Display > HDR) and capture again. The capture still matches the screen.
 3. Turn HDR off and capture the whole screen. As before this change (SDR monitors keep the old capture path).
