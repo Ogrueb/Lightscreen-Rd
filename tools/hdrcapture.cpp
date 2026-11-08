@@ -691,21 +691,24 @@ QString HdrCapture::report()
         lines << (grab.isNull() ? QStringLiteral("  -> failed, Qt's grab is used") : QStringLiteral("  -> used"));
     }
 
-    // Every visible Chrome or Edge window: what Windows.Graphics.Capture hands over.
+    // Every visible Chromium browser, Explorer and Notepad window: what Windows.Graphics.Capture hands over, so a
+    // browser can be compared with ordinary SDR windows.
     EnumWindows(
         [](HWND window, LPARAM) -> BOOL {
             wchar_t className[64] = {};
             GetClassNameW(window, className, 64);
 
             if (!IsWindowVisible(window) || IsIconic(window)
-                || QString::fromWCharArray(className) != QLatin1String("Chrome_WidgetWin_1")
+                || (QString::fromWCharArray(className) != QLatin1String("Chrome_WidgetWin_1")
+                    && QString::fromWCharArray(className) != QLatin1String("CabinetWClass")
+                    && QString::fromWCharArray(className) != QLatin1String("Notepad"))
                 || GetWindowTextLengthW(window) == 0) {
                 return TRUE;
             }
 
             wchar_t title[256] = {};
             GetWindowTextW(window, title, 256);
-            note(QStringLiteral("Browser window \"%1\"").arg(QString::fromWCharArray(title).left(60)));
+            note(QStringLiteral("Window \"%1\" (%2)").arg(QString::fromWCharArray(title).left(60), QString::fromWCharArray(className)));
 
             HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
             MONITORINFOEXW info = {};
