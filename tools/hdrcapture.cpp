@@ -907,14 +907,27 @@ bool uncovered(HWND window, const RECT &bounds)
 // some Windows 11 builds draw whatever the app asks) is not needed. Null otherwise.
 QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
 {
-    const RECT bounds = visibleBounds(window);
     const RECT &origin = hdr.description.DesktopCoordinates;
+    RECT bounds = visibleBounds(window);
     RECT inside;
 
+    // A snapped or maximized window's frame can reach a pixel or so past the screen edge (seen: 1923x2161 on a
+    // 2160-pixel-high output); that sliver is not shown anyway, so the window is cut at the edge. A window further
+    // off screen is left to Windows.Graphics.Capture, which has the hidden part.
+    const int overshoot = 8;
+
     if (IsIconic(window) || IsRectEmpty(&bounds) || !IntersectRect(&inside, &bounds, &origin)
-        || !EqualRect(&inside, &bounds)) {
-        note(QStringLiteral("  not wholly on this output"));
+        || inside.left - bounds.left > overshoot || inside.top - bounds.top > overshoot
+        || bounds.right - inside.right > overshoot || bounds.bottom - inside.bottom > overshoot) {
+        note(QStringLiteral("  not wholly on this output (frame %1,%2 to %3,%4)")
+                 .arg(bounds.left).arg(bounds.top).arg(bounds.right).arg(bounds.bottom));
         return QPixmap();
+    }
+
+    if (!EqualRect(&inside, &bounds)) {
+        note(QStringLiteral("  frame cut at the screen edge to %1x%2")
+                 .arg(inside.right - inside.left).arg(inside.bottom - inside.top));
+        bounds = inside;
     }
 
     if (!uncovered(window, bounds)) {
