@@ -4,11 +4,11 @@ Changes in Lightscreen Rd, the maintained fork of Lightscreen by Christian Kaise
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Bug numbers refer to `docs/known-bugs/`.
 
-## [3.0.1] - 2026-11-09
+## [3.0.2] - 2026-11-09
 
 ### Fixed
 
-- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in every capture mode. On such a monitor the screen is now read in HDR (DXGI desktop duplication) and scaled by Windows' "SDR content brightness", so the capture matches the screen. A single window is cut from that screen capture when nothing covers it; when something does, it is read on its own (Windows.Graphics.Capture) and matched to the screen's brightness. Content brighter than SDR white (HDR video, HDR photos) is clipped to white, as in any 8-bit screenshot. SDR monitors capture exactly as before (bug 9).
+- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in every capture mode. 3.0.1's fix for this did not work on such a monitor: screen and area captures were still too bright, window captures came out 2.5 times too dark, and a yellow border flashed around every captured window. The screen is now read in HDR (DXGI desktop duplication) and scaled by Windows' "SDR content brightness", so the capture matches the screen. A single window is cut from that screen capture when nothing covers it; when something does, it is read on its own (Windows.Graphics.Capture) and matched to the screen's brightness. Content brighter than SDR white (HDR video, HDR photos) is clipped to white, as in any 8-bit screenshot. SDR monitors capture exactly as before (bug 9).
 
 ### Added
 
@@ -21,6 +21,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Bug
 - With HDR on, capturing a window that another window covers can flash a yellow border around it for a moment on Windows 10 and on Windows 11 builds that do not offer the setting to hide it. Windows draws the border; it never appears in the saved file. Uncovered windows do not flash (bug 46).
 - With HDR on, a window that is mostly covered, mostly off screen, on a rotated monitor, or spanning two monitors is captured the old way, which can be too bright for a browser in its HDR state (bug 47).
 - An HDR screen capture takes longer than a plain one (about 0.2 s at 4K). In rare cases Windows gives no HDR frame and the plain capture runs instead; `--hdr-report` run straight afterwards shows why (bug 48).
+
+## [3.0.1] - 2026-11-08
+
+### Fixed
+
+- A first fix for browsers captured too bright on a monitor in HDR mode (bug 9). It did not take effect for screen and area captures, made window captures too dark, and flashed a yellow border around captured windows; 3.0.2 replaces it.
 
 ## [3.0.0] - 2026-10-29
 
@@ -84,5 +90,6 @@ First release of the fork, based on upstream Lightscreen 2.5. Settings and scree
 - Release workflow: a tag `v<version>` builds the Windows zip and opens a draft GitHub Release.
 - Decisions, known bugs, status and manual Windows checks are recorded under `docs/`.
 
+[3.0.2]: https://github.com/Ogrueb/Lightscreen-Rd/releases/tag/v3.0.2
 [3.0.1]: https://github.com/Ogrueb/Lightscreen-Rd/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Ogrueb/Lightscreen-Rd/releases/tag/v3.0.0
