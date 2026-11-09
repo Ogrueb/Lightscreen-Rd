@@ -21,7 +21,7 @@
 // The Windows headers come before the other Qt headers, so Qt's signals/slots/emit macros never meet the WinRT ones.
 #ifdef Q_OS_WIN
     #include <qt_windows.h>
-    #include <d3d11.h>
+    #include <d3d11_4.h>
     #include <dwmapi.h>
     #include <dxgi1_6.h>
     #include <roapi.h>
@@ -383,6 +383,11 @@ bool findHdrOutput(const QString &deviceName, HdrOutput &result)
                      .arg(sdrWhite)
                      .arg(description.MaxLuminance));
 
+            if (description.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709) {
+                // Reported as possible but not yet seen; logged so a report shows it if a machine has it.
+                note(QStringLiteral("  colour space 17 (scRGB desktop) is not handled; Qt's grab is used"));
+            }
+
             if (description.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
                 return false;
             }
@@ -402,6 +407,58 @@ bool findHdrOutput(const QString &deviceName, HdrOutput &result)
     return false;
 }
 
+// One D3D11 device per adapter for the process lifetime (creating one costs tens of milliseconds per capture). A
+// removed device (driver update, GPU reset) is replaced on the next capture.
+bool deviceFor(IDXGIAdapter1 *adapter, ComPtr<ID3D11Device> &device, ComPtr<ID3D11DeviceContext> &context)
+{
+    struct Cached {
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+    };
+    static QHash<quint64, Cached> cache;
+
+    DXGI_ADAPTER_DESC1 description;
+
+    if (TRACE_FAILED(adapter->GetDesc1(&description))) {
+        return false;
+    }
+
+    const quint64 key = (quint64(quint32(description.AdapterLuid.HighPart)) << 32) | description.AdapterLuid.LowPart;
+    auto cached = cache.find(key);
+
+    if (cached != cache.end() && cached->device->GetDeviceRemovedReason() != S_OK) {
+        note(QStringLiteral("  cached device removed; creating a new one"));
+        cache.erase(cached);
+        cached = cache.end();
+    }
+
+    if (cached == cache.end()) {
+        QElapsedTimer timer;
+        timer.start();
+        Cached created;
+
+        if (TRACE_FAILED(D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                           nullptr, 0, D3D11_SDK_VERSION, &created.device, nullptr,
+                                           &created.context))) {
+            return false;
+        }
+
+        // Windows.Graphics.Capture's free-threaded frame pool uses the device from its own threads.
+        ComPtr<ID3D11Multithread> multithread;
+
+        if (SUCCEEDED(created.context.As(&multithread))) {
+            multithread->SetMultithreadProtected(TRUE);
+        }
+
+        cached = cache.insert(key, created);
+        note(QStringLiteral("  D3D11 device created in %1 ms (kept for later captures)").arg(timer.elapsed()));
+    }
+
+    device = cached->device;
+    context = cached->context;
+    return true;
+}
+
 // FP16 RGBA pixels copied off the GPU, rows width * 8 bytes apart.
 struct Fp16Image {
     std::vector<qfloat16> pixels;
@@ -412,10 +469,13 @@ struct Fp16Image {
     int bytesPerLine() const { return width * 8; }
 };
 
-// Copies an FP16 texture to the CPU; only the top left contentSize when it is given.
+// Copies an FP16 texture to the CPU: only region when it is given (it must lie inside the texture), so a window
+// or the content of a larger texture costs its own size, not the whole output's.
 Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Texture2D *texture,
-                      QSize contentSize = QSize())
+                      QRect region = QRect())
 {
+    QElapsedTimer timer;
+    timer.start();
     D3D11_TEXTURE2D_DESC description;
     texture->GetDesc(&description);
 
@@ -424,6 +484,21 @@ Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11
         return Fp16Image();
     }
 
+    const QRect whole(0, 0, int(description.Width), int(description.Height));
+
+    if (region.isNull()) {
+        region = whole;
+    }
+
+    if (region.isEmpty() || !whole.contains(region)) {
+        note(QStringLiteral("  region %1,%2 %3x%4 is not inside the %5x%6 texture")
+                 .arg(region.x()).arg(region.y()).arg(region.width()).arg(region.height())
+                 .arg(whole.width()).arg(whole.height()));
+        return Fp16Image();
+    }
+
+    description.Width = UINT(region.width());
+    description.Height = UINT(region.height());
     description.Usage = D3D11_USAGE_STAGING;
     description.BindFlags = 0;
     description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -437,7 +512,9 @@ Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11
         return Fp16Image();
     }
 
-    context->CopyResource(staging.Get(), texture);
+    const D3D11_BOX box = { UINT(region.left()), UINT(region.top()), 0, UINT(region.right() + 1),
+                            UINT(region.bottom() + 1), 1 };
+    context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture, 0, &box);
 
     D3D11_MAPPED_SUBRESOURCE mapped;
 
@@ -446,13 +523,8 @@ Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11
     }
 
     Fp16Image image;
-    image.width = int(description.Width);
-    image.height = int(description.Height);
-
-    if (contentSize.isValid()) {
-        image.width = qMin(image.width, contentSize.width());
-        image.height = qMin(image.height, contentSize.height());
-    }
+    image.width = region.width();
+    image.height = region.height();
 
     image.pixels.resize(size_t(image.width) * image.height * 4);
 
@@ -464,8 +536,8 @@ Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11
     context->Unmap(staging.Get(), 0);
 
     if (trace) {
-        note(QStringLiteral("  texture %1x%2, used %3x%4").arg(description.Width).arg(description.Height)
-                 .arg(image.width).arg(image.height));
+        note(QStringLiteral("  texture %1x%2, read %3x%4 at %5,%6 in %7 ms").arg(whole.width()).arg(whole.height())
+                 .arg(image.width).arg(image.height).arg(region.x()).arg(region.y()).arg(timer.elapsed()));
         note(HdrCapture::describeScRgb(image.pixels.data(), image.width, image.height, image.bytesPerLine()));
     }
 
@@ -473,13 +545,12 @@ Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11
 }
 
 // The output's composed desktop in FP16, in the panel's own orientation (see rotation).
-Fp16Image duplicateFrameOnce(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation, HRESULT *failure)
+Fp16Image duplicateFrameOnce(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation, HRESULT *failure, const QRect &region)
 {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
 
-    if (TRACE_FAILED(D3D11CreateDevice(hdr.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
-                                       D3D11_SDK_VERSION, &device, nullptr, &context))) {
+    if (!deviceFor(hdr.adapter.Get(), device, context)) {
         return Fp16Image();
     }
 
@@ -520,7 +591,7 @@ Fp16Image duplicateFrameOnce(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation,
                  .arg(info.AccumulatedFrames));
 
         if (SUCCEEDED(resource.As(&texture))) {
-            image = readTexture(device.Get(), context.Get(), texture.Get());
+            image = readTexture(device.Get(), context.Get(), texture.Get(), region);
         }
 
         duplication->ReleaseFrame();
@@ -535,14 +606,15 @@ Fp16Image duplicateFrameOnce(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation,
 
 // A duplication is lost (or delivers nothing) when the desktop switches mode, for instance when a browser changes its swap chain (and its
 // HDR state) or a full-screen app starts; a new one is made once before giving up.
-Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
+// Only region of the panel when it is given (in the panel's orientation).
+Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation, const QRect &region = QRect())
 {
     HRESULT failure = S_OK;
-    Fp16Image image = duplicateFrameOnce(hdr, rotation, &failure);
+    Fp16Image image = duplicateFrameOnce(hdr, rotation, &failure, region);
 
     if (image.isNull() && (failure == DXGI_ERROR_ACCESS_LOST || failure == DXGI_ERROR_WAIT_TIMEOUT)) {
         note(QStringLiteral("  no frame; trying a new duplication"));
-        image = duplicateFrameOnce(hdr, rotation, &failure);
+        image = duplicateFrameOnce(hdr, rotation, &failure, region);
     }
 
     return image;
@@ -683,9 +755,7 @@ Fp16Image windowFrame(HWND window, const HdrOutput &hdr)
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
 
-    if (TRACE_FAILED(D3D11CreateDevice(hdr.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &device,
-                                       nullptr, &context))) {
+    if (!deviceFor(hdr.adapter.Get(), device, context)) {
         return Fp16Image();
     }
 
@@ -774,7 +844,7 @@ Fp16Image windowFrame(HWND window, const HdrOutput &hdr)
             if (!TRACE_FAILED(frame->get_Surface(&surface)) && !TRACE_FAILED(surface.As(&access))
                 && !TRACE_FAILED(access->GetInterface(IID_PPV_ARGS(&texture)))) {
                 image = readTexture(device.Get(), context.Get(), texture.Get(),
-                                    QSize(contentSize.Width, contentSize.Height));
+                                    QRect(0, 0, contentSize.Width, contentSize.Height));
             }
 
             closeObject(frame);
@@ -855,20 +925,21 @@ QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
     // The window picker closes just before this; wait for the desktop to be composed without it.
     DwmFlush();
 
+    // Only the window's rectangle is read off the GPU. It is in desktop orientation, so a rotated panel (whose
+    // frame is in its own orientation) is left to the other path.
+    const int x = bounds.left - origin.left;
+    const int y = bounds.top - origin.top;
+    const QRect region(x, y, bounds.right - bounds.left, bounds.bottom - bounds.top);
     DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
-    const Fp16Image desktop = duplicateFrame(hdr, &rotation);
+    const Fp16Image desktop = duplicateFrame(hdr, &rotation, region);
 
     if (desktop.isNull() || (rotation != DXGI_MODE_ROTATION_IDENTITY && rotation != DXGI_MODE_ROTATION_UNSPECIFIED)
-        || desktop.width != origin.right - origin.left || desktop.height != origin.bottom - origin.top) {
+        || desktop.width != region.width() || desktop.height != region.height()) {
         note(QStringLiteral("  no usable desktop frame (rotation %1)").arg(int(rotation)));
         return QPixmap();
     }
 
-    const int x = bounds.left - origin.left;
-    const int y = bounds.top - origin.top;
-    const uchar *start = reinterpret_cast<const uchar *>(desktop.pixels.data()) + qsizetype(y) * desktop.bytesPerLine()
-                         + qsizetype(x) * 8;
-    const QImage image = HdrCapture::scRgbToSrgb(start, bounds.right - bounds.left, bounds.bottom - bounds.top,
+    const QImage image = HdrCapture::scRgbToSrgb(desktop.pixels.data(), desktop.width, desktop.height,
                                                  desktop.bytesPerLine(), hdr.sdrWhite);
     note(QStringLiteral("  cropped from the desktop at %1,%2, divided by the SDR white level %3")
              .arg(x).arg(y).arg(hdr.sdrWhite));
@@ -1050,6 +1121,16 @@ QPixmap HdrCapture::grabWindow(WId window)
 #else
     Q_UNUSED(window)
     return QPixmap();
+#endif
+}
+
+bool HdrCapture::uncovered(WId window)
+{
+#ifdef Q_OS_WIN
+    return uncovered(HWND(window), visibleBounds(HWND(window)));
+#else
+    Q_UNUSED(window)
+    return false;
 #endif
 }
 

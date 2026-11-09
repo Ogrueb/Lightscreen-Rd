@@ -7,6 +7,11 @@
 
 #include <tools/hdrcapture.h>
 
+#ifdef Q_OS_WIN
+    #include <qt_windows.h>
+    #include <dwmapi.h>
+#endif
+
 namespace {
 double toLinear(int code)
 {
@@ -247,6 +252,65 @@ private slots:
         QVERIFY(!text.isEmpty());
         qInfo().noquote() << "\n" << text;
     }
+
+#ifdef Q_OS_WIN
+    // Which windows grabWindow cuts from the desktop: one with nothing above it, but not one under another window,
+    // unless that window is elsewhere, minimized, hidden or cloaked. Plain topmost popups at the top left, away from
+    // the taskbar, so nothing else on the desktop is above them.
+    void uncoveredWindows()
+    {
+        const auto popup = [](int x, int y) {
+            return CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"STATIC", L"", WS_POPUP | WS_VISIBLE, x, y, 300,
+                                   200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        };
+        const auto top = [](HWND window) {
+            SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        };
+
+        HWND lower = popup(100, 100);
+        QVERIFY(lower);
+        top(lower);
+        QVERIFY(HdrCapture::uncovered(WId(lower)));
+
+        HWND upper = popup(250, 150);
+        QVERIFY(upper);
+        top(upper);
+        QVERIFY(!HdrCapture::uncovered(WId(lower)));
+        QVERIFY(HdrCapture::uncovered(WId(upper)));
+
+        SetWindowPos(upper, nullptr, 500, 100, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        QVERIFY(HdrCapture::uncovered(WId(lower)));
+
+        SetWindowPos(upper, nullptr, 250, 150, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        QVERIFY(!HdrCapture::uncovered(WId(lower)));
+        ShowWindow(upper, SW_MINIMIZE);
+        QVERIFY(HdrCapture::uncovered(WId(lower)));
+        ShowWindow(upper, SW_RESTORE);
+        top(upper);
+        QVERIFY(!HdrCapture::uncovered(WId(lower)));
+        ShowWindow(upper, SW_HIDE);
+        QVERIFY(HdrCapture::uncovered(WId(lower)));
+        ShowWindow(upper, SW_SHOWNOACTIVATE);
+        top(upper);
+        QVERIFY(!HdrCapture::uncovered(WId(lower)));
+
+        BOOL cloak = TRUE;
+
+        if (SUCCEEDED(DwmSetWindowAttribute(upper, DWMWA_CLOAK, &cloak, sizeof(cloak)))) {
+            QVERIFY(HdrCapture::uncovered(WId(lower)));
+        } else {
+            qInfo("DWM cannot cloak a window here; the cloaked case is not checked");
+        }
+
+        DestroyWindow(upper);
+        DestroyWindow(lower);
+    }
+#else
+    void uncoveredWindows()
+    {
+        QVERIFY(!HdrCapture::uncovered(WId(0)));
+    }
+#endif
 
     // Off Windows, or on an SDR monitor, there is no HDR capture and the caller keeps Qt's grab.
     void grabScreenFallsBack()

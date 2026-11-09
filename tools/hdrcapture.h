@@ -55,6 +55,10 @@ QString deviceName(const QScreen *screen);
 // visible (matchScale). A null pixmap otherwise or on any failure, so the caller keeps PrintWindow.
 QPixmap grabWindow(WId window);
 
+// Whether no visible, uncloaked window above this one overlaps its visible frame, so the composed desktop shows all
+// of it (grabWindow then cuts it from the desktop). False off Windows.
+bool uncovered(WId window);
+
 // Diagnostics for bug 9: for each screen and each visible Chrome/Edge window, whether the HDR path applies, the SDR
 // white level, any failed call, and the raw scRGB values Windows hands over (most common colours), so the scaling can
 // be checked against a page of known colours. Captures each screen and browser window once.
