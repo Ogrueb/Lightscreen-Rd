@@ -29,6 +29,7 @@ options/cursor=true
 windows:options/cursor=false
 options/delay=7
 options/disableUpdater=true
+options/hdrCapture=1
 options/hide=false
 options/history=false
 options/magnify=true

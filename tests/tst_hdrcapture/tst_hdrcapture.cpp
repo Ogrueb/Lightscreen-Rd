@@ -253,6 +253,88 @@ private slots:
         qInfo().noquote() << "\n" << text;
     }
 
+    // The free plausibility checks: a believable SDR white level and calibration factor, and a converted image that is
+    // not almost all pure black or white (counted by the conversion itself).
+    void plausibilityChecks()
+    {
+        QVERIFY(HdrCapture::plausibleSdrWhite(1.0f));
+        QVERIFY(HdrCapture::plausibleSdrWhite(5.0f));
+        QVERIFY(HdrCapture::plausibleSdrWhite(12.5f));
+        QVERIFY(!HdrCapture::plausibleSdrWhite(0.5f));
+        QVERIFY(!HdrCapture::plausibleSdrWhite(20.0f));
+        QVERIFY(!HdrCapture::plausibleSdrWhite(std::nanf("")));
+
+        QVERIFY(HdrCapture::plausibleCalibration(1.0f));
+        QVERIFY(HdrCapture::plausibleCalibration(2.5f));
+        QVERIFY(!HdrCapture::plausibleCalibration(0.1f));
+        QVERIFY(!HdrCapture::plausibleCalibration(12.0f));
+
+        // 100 pixels: 99 white (scRGB 5.0 at white 1.0 clips) and one grey.
+        std::vector<qfloat16> data(100 * 4, qfloat16(5.0f));
+        data[0] = data[1] = data[2] = qfloat16(0.2f);
+        qint64 flat = -1;
+        QVERIFY(!HdrCapture::scRgbToSrgb(data.data(), 100, 1, 100 * 8, 1.0f, &flat).isNull());
+        QCOMPARE(flat, qint64(99));
+        QVERIFY(!HdrCapture::plausibleFlatShare(flat, 100));
+
+        // The same pixels at the right white level (5.0) are white too; a page of 90 % white passes.
+        QVERIFY(HdrCapture::plausibleFlatShare(90, 100));
+        QVERIFY(HdrCapture::plausibleFlatShare(0, 0));
+    }
+
+    // The optional check against Qt's grab: an HDR result clearly brighter than GDI's is wrong.
+    void notBrighterThanGdi()
+    {
+        QImage gdi(64, 64, QImage::Format_RGB32);
+        gdi.fill(qRgb(100, 100, 100));
+        QImage same = gdi;
+        QImage darker(64, 64, QImage::Format_RGB32);
+        darker.fill(qRgb(40, 40, 40));
+        QImage brighter(64, 64, QImage::Format_RGB32);
+        brighter.fill(qRgb(200, 200, 200));
+
+        QVERIFY(HdrCapture::notBrighterThanGdi(same, gdi));
+        QVERIFY(HdrCapture::notBrighterThanGdi(darker, gdi));
+        QVERIFY(!HdrCapture::notBrighterThanGdi(brighter, gdi));
+        QVERIFY(HdrCapture::notBrighterThanGdi(brighter, QImage())); // nothing to compare with
+        QVERIFY(HdrCapture::notBrighterThanGdi(brighter, gdi.scaled(32, 32))); // different sizes
+    }
+
+    // The kill switch: off, neither capture runs (on every platform), and nothing is left behind by the tripwire.
+    void killSwitch()
+    {
+        QVERIFY(HdrCapture::isEnabled());
+        HdrCapture::setEnabled(false);
+        QVERIFY(HdrCapture::grabScreen(QStringLiteral("no such screen")).isNull());
+        QVERIFY(HdrCapture::grabWindow(WId(0)).isNull());
+        HdrCapture::setEnabled(true);
+        QVERIFY(HdrCapture::isEnabled());
+    }
+
+    // The crash tripwire: a marker left behind is reported once and removed; none is left by a capture that returns.
+    void crashMarker()
+    {
+        QTemporaryDir dir;
+        const QString marker = dir.filePath(QStringLiteral("running"));
+        HdrCapture::setCrashMarkerPath(marker);
+        QVERIFY(!HdrCapture::takeCrashMarker());
+
+        HdrCapture::grabScreen(QStringLiteral("no such screen"));
+        QVERIFY(!QFile::exists(marker));
+
+#ifdef Q_OS_WIN
+        {
+            QFile file(marker);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+
+        QVERIFY(HdrCapture::takeCrashMarker());
+        QVERIFY(!QFile::exists(marker));
+        QVERIFY(!HdrCapture::takeCrashMarker());
+#endif
+        HdrCapture::setCrashMarkerPath(QString());
+    }
+
 #ifdef Q_OS_WIN
     // Which windows grabWindow cuts from the desktop: one with nothing above it, but not one under another window,
     // unless that window is elsewhere, minimized, hidden or cloaked. Plain topmost popups at the top left, away from

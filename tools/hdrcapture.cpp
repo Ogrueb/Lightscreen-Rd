@@ -89,7 +89,7 @@ inline uchar encode(float linear, const std::array<uchar, LutSize> &lut)
 }
 } // namespace
 
-QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int bytesPerLine, float sdrWhite)
+QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int bytesPerLine, float sdrWhite, qint64 *flat)
 {
     if (!pixels || width <= 0 || height <= 0 || bytesPerLine < width * 8 || !(sdrWhite > 0)) {
         return QImage();
@@ -104,6 +104,7 @@ QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int by
     const auto &lut = srgbLut();
     const float scale = 1 / sdrWhite;
     std::vector<float> row(size_t(width) * 4);
+    qint64 flatPixels = 0;
 
     for (int y = 0; y < height; ++y) {
         const auto *source = reinterpret_cast<const qfloat16 *>(static_cast<const uchar *>(pixels) + qsizetype(y) * bytesPerLine);
@@ -113,11 +114,76 @@ QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int by
 
         for (int x = 0; x < width; ++x) {
             const float *p = row.data() + x * 4;
-            target[x] = qRgb(encode(p[0] * scale, lut), encode(p[1] * scale, lut), encode(p[2] * scale, lut));
+            const uchar r = encode(p[0] * scale, lut);
+            const uchar g = encode(p[1] * scale, lut);
+            const uchar b = encode(p[2] * scale, lut);
+            flatPixels += (r == g && g == b && (r == 0 || r == 255));
+            target[x] = qRgb(r, g, b);
         }
     }
 
+    if (flat) {
+        *flat = flatPixels;
+    }
+
     return image;
+}
+
+bool HdrCapture::plausibleSdrWhite(float sdrWhite)
+{
+    return sdrWhite >= 1.0f && sdrWhite <= 12.5f;
+}
+
+bool HdrCapture::plausibleCalibration(float factor)
+{
+    return factor >= 0.2f && factor <= 10.0f;
+}
+
+bool HdrCapture::plausibleFlatShare(qint64 flat, qint64 pixels)
+{
+    return pixels <= 0 || flat * 100 < pixels * 98;
+}
+
+namespace {
+bool gdiCheck = false;
+}
+
+void HdrCapture::setCheckAgainstGdi(bool on)
+{
+    gdiCheck = on;
+}
+
+bool HdrCapture::checkAgainstGdi()
+{
+    return gdiCheck;
+}
+
+bool HdrCapture::notBrighterThanGdi(const QImage &hdr, const QImage &gdi)
+{
+    if (hdr.isNull() || gdi.isNull() || hdr.size() != gdi.size()) {
+        return true;
+    }
+
+    const QImage a = hdr.convertToFormat(QImage::Format_RGB32);
+    const QImage b = gdi.convertToFormat(QImage::Format_RGB32);
+    qint64 sumA = 0;
+    qint64 sumB = 0;
+    qint64 count = 0;
+
+    // Every 4th pixel of every 4th row is plenty for a mean.
+    for (int y = 0; y < a.height(); y += 4) {
+        const QRgb *lineA = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+        const QRgb *lineB = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+
+        for (int x = 0; x < a.width(); x += 4) {
+            sumA += qRed(lineA[x]) + qGreen(lineA[x]) + qBlue(lineA[x]);
+            sumB += qRed(lineB[x]) + qGreen(lineB[x]) + qBlue(lineB[x]);
+            ++count;
+        }
+    }
+
+    // Allowed: 2 levels per channel on average, for rounding and a frame's difference in content.
+    return sumA <= sumB + count * 3 * 2;
 }
 
 QString HdrCapture::describeScRgb(const void *pixels, int width, int height, int bytesPerLine)
@@ -392,7 +458,8 @@ bool findHdrOutput(const QString &deviceName, HdrOutput &result)
                 return false;
             }
 
-            if (!(sdrWhite > 0)) {
+            if (!HdrCapture::plausibleSdrWhite(sdrWhite)) {
+                note(QStringLiteral("  SDR white level %1 is outside 1.0 to 12.5: not believed").arg(sdrWhite));
                 return false;
             }
 
@@ -620,6 +687,22 @@ Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation, con
     return image;
 }
 
+// scRgbToSrgb with the flat-image check: null, so the caller falls back, when 98 % or more of the pixels came out
+// pure black or white (a wrong scale).
+QImage convertChecked(const void *pixels, int width, int height, int bytesPerLine, float white)
+{
+    qint64 flat = 0;
+    const QImage image = HdrCapture::scRgbToSrgb(pixels, width, height, bytesPerLine, white, &flat);
+
+    if (!image.isNull() && !HdrCapture::plausibleFlatShare(flat, qint64(width) * height)) {
+        note(QStringLiteral("  %1 % of the pixels pure black or white: the scale looks wrong, not used")
+                 .arg(100.0 * flat / (qint64(width) * height), 0, 'f', 1));
+        return QImage();
+    }
+
+    return image;
+}
+
 QPixmap duplicate(const HdrOutput &hdr)
 {
     DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
@@ -629,8 +712,12 @@ QPixmap duplicate(const HdrOutput &hdr)
         return QPixmap();
     }
 
-    QImage image = HdrCapture::scRgbToSrgb(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(),
-                                           hdr.sdrWhite);
+    QImage image = convertChecked(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(), hdr.sdrWhite);
+
+    if (image.isNull()) {
+        return QPixmap();
+    }
+
     note(QStringLiteral("  divided by the SDR white level %1").arg(hdr.sdrWhite));
 
     // The frame is in the panel's own orientation; turn it to the desktop's.
@@ -818,7 +905,8 @@ Fp16Image windowFrame(HWND window, const HdrOutput &hdr)
     if (!TRACE_FAILED(session->StartCapture())) {
         // A free-threaded pool fills without a message loop; the first frame normally arrives within a few
         // milliseconds. A minimized window never sends one.
-        for (int wait = 0; wait < 100 && image.isNull(); ++wait) {
+        // 500 ms at most, generous for slower hardware.
+        for (int wait = 0; wait < 50 && image.isNull(); ++wait) {
             ComPtr<Capture::IDirect3D11CaptureFrame> frame;
 
             if (TRACE_FAILED(pool->TryGetNextFrame(&frame))) {
@@ -826,8 +914,8 @@ Fp16Image windowFrame(HWND window, const HdrOutput &hdr)
             }
 
             if (!frame) {
-                if (wait == 99) {
-                    note(QStringLiteral("  no frame within a second"));
+                if (wait == 49) {
+                    note(QStringLiteral("  no frame within 500 ms"));
                 }
 
                 Sleep(10);
@@ -1016,6 +1104,8 @@ QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
         return QPixmap();
     }
 
+    // Not checked for a flat image: a window is often almost all white (an empty document), and its scale is the
+    // screen's, which the screen capture and the SDR white level check already cover.
     const QImage image = HdrCapture::scRgbToSrgb(desktop.pixels.data(), desktop.width, desktop.height,
                                                  desktop.bytesPerLine(), hdr.sdrWhite);
     note(QStringLiteral("  cropped from the desktop at %1,%2, divided by the SDR white level %3")
@@ -1067,18 +1157,24 @@ QPixmap calibratedWindow(HWND window, const HdrOutput &hdr)
         return QPixmap();
     }
 
+    if (!HdrCapture::plausibleCalibration(scale)) {
+        note(QStringLiteral("  factor outside 0.2 to 10: not believed"));
+        return QPixmap();
+    }
+
     const float white = hdr.sdrWhite / scale;
     note(QStringLiteral("  divided by %1").arg(white));
-    const QImage image = HdrCapture::scRgbToSrgb(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(),
-                                                 white);
+    const QImage image = convertChecked(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(), white);
     return image.isNull() ? QPixmap() : QPixmap::fromImage(image);
 }
 
-// The trace of the app's last capture, kept in the temp folder so that `--hdr-report` (another process) can show
-// which path a real capture took and why. Only when no report is tracing already.
-QString lastCapturePath()
+// The traces of the app's last captures, kept in the temp folder so that `--hdr-report` (another process) can show
+// which path a real capture took and why: 1 is the newest, up to captureLogCount. Only when no report is tracing.
+const int captureLogCount = 5;
+
+QString captureLogPath(int number)
 {
-    return QDir(QDir::tempPath()).filePath(QStringLiteral("lightscreen-hdr-last-capture.txt"));
+    return QDir(QDir::tempPath()).filePath(QStringLiteral("lightscreen-hdr-capture-%1.txt").arg(number));
 }
 
 // Set while report() runs: its own untraced timing runs must not replace the log of the app's last capture.
@@ -1103,7 +1199,13 @@ public:
         }
 
         trace = nullptr;
-        QFile file(lastCapturePath());
+        QFile::remove(captureLogPath(captureLogCount));
+
+        for (int number = captureLogCount - 1; number >= 1; --number) {
+            QFile::rename(captureLogPath(number), captureLogPath(number + 1));
+        }
+
+        QFile file(captureLogPath(1));
 
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
             file.write(mLines.join(QLatin1Char('\n')).toUtf8());
@@ -1121,6 +1223,37 @@ private:
     bool mActive;
 };
 
+// The marker file of the crash tripwire, present while an HDR capture runs (see setCrashMarkerPath).
+QString crashMarkerPath;
+
+class CrashMarker
+{
+public:
+    CrashMarker()
+    {
+        if (crashMarkerPath.isEmpty()) {
+            return;
+        }
+
+        QFile file(crashMarkerPath);
+
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(QDateTime::currentDateTime().toString(Qt::ISODateWithMs).toUtf8());
+            mWritten = true;
+        }
+    }
+
+    ~CrashMarker()
+    {
+        if (mWritten) {
+            QFile::remove(crashMarkerPath);
+        }
+    }
+
+private:
+    bool mWritten = false;
+};
+
 QPixmap captureWindow(HWND window, const HdrOutput &hdr)
 {
     note(QStringLiteral(" Desktop duplication, uncovered window:"));
@@ -1129,6 +1262,38 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
 }
 } // namespace
 #endif
+
+namespace {
+bool enabled = true;
+}
+
+void HdrCapture::setEnabled(bool on)
+{
+    enabled = on;
+}
+
+bool HdrCapture::isEnabled()
+{
+    return enabled;
+}
+
+void HdrCapture::setCrashMarkerPath(const QString &path)
+{
+#ifdef Q_OS_WIN
+    crashMarkerPath = path;
+#else
+    Q_UNUSED(path)
+#endif
+}
+
+bool HdrCapture::takeCrashMarker()
+{
+#ifdef Q_OS_WIN
+    return !crashMarkerPath.isEmpty() && QFile::exists(crashMarkerPath) && QFile::remove(crashMarkerPath);
+#else
+    return false;
+#endif
+}
 
 QString HdrCapture::deviceName(const QScreen *screen)
 {
@@ -1155,18 +1320,34 @@ QString HdrCapture::deviceName(const QScreen *screen)
 QPixmap HdrCapture::grabScreen(const QString &deviceName)
 {
 #ifdef Q_OS_WIN
-    CaptureLog log(QStringLiteral("Screen capture of %1").arg(deviceName));
-    HdrOutput hdr;
-
-    if (!findHdrOutput(deviceName, hdr)) {
-        note(QStringLiteral("  no HDR output named %1").arg(deviceName));
-        log.result(false, QStringLiteral("Qt's grab"));
+    if (!enabled) {
         return QPixmap();
     }
 
-    const QPixmap grab = duplicate(hdr);
-    log.result(!grab.isNull(), QStringLiteral("Qt's grab"));
-    return grab;
+    CaptureLog log(QStringLiteral("Screen capture of %1").arg(deviceName));
+    CrashMarker marker;
+
+    // Any C++ exception (a failed 66 MB allocation) falls back to Qt's grab instead of ending the app.
+    try {
+        HdrOutput hdr;
+
+        if (!findHdrOutput(deviceName, hdr)) {
+            note(QStringLiteral("  no HDR output named %1").arg(deviceName));
+            log.result(false, QStringLiteral("Qt's grab"));
+            return QPixmap();
+        }
+
+        const QPixmap grab = duplicate(hdr);
+        log.result(!grab.isNull(), QStringLiteral("Qt's grab"));
+        return grab;
+    } catch (const std::exception &error) {
+        note(QStringLiteral("  exception: %1").arg(QString::fromLocal8Bit(error.what())));
+    } catch (...) {
+        note(QStringLiteral("  unknown exception"));
+    }
+
+    log.result(false, QStringLiteral("Qt's grab"));
+    return QPixmap();
 #else
     Q_UNUSED(deviceName)
     return QPixmap();
@@ -1176,28 +1357,43 @@ QPixmap HdrCapture::grabScreen(const QString &deviceName)
 QPixmap HdrCapture::grabWindow(WId window)
 {
 #ifdef Q_OS_WIN
+    if (!enabled) {
+        return QPixmap();
+    }
+
     CaptureLog log(QStringLiteral("Window capture"));
-    HMONITOR monitor = MonitorFromWindow(HWND(window), MONITOR_DEFAULTTONULL);
-    MONITORINFOEXW info = {};
-    info.cbSize = sizeof(info);
+    CrashMarker marker;
 
-    if (!monitor || !GetMonitorInfoW(monitor, &info)) {
-        note(QStringLiteral("  no monitor"));
-        log.result(false, QStringLiteral("PrintWindow"));
-        return QPixmap();
+    try {
+        HMONITOR monitor = MonitorFromWindow(HWND(window), MONITOR_DEFAULTTONULL);
+        MONITORINFOEXW info = {};
+        info.cbSize = sizeof(info);
+
+        if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+            note(QStringLiteral("  no monitor"));
+            log.result(false, QStringLiteral("PrintWindow"));
+            return QPixmap();
+        }
+
+        HdrOutput hdr;
+
+        if (!findHdrOutput(QString::fromWCharArray(info.szDevice), hdr)) {
+            note(QStringLiteral("  no HDR output named %1").arg(QString::fromWCharArray(info.szDevice)));
+            log.result(false, QStringLiteral("PrintWindow"));
+            return QPixmap();
+        }
+
+        const QPixmap grab = captureWindow(HWND(window), hdr);
+        log.result(!grab.isNull(), QStringLiteral("PrintWindow"));
+        return grab;
+    } catch (const std::exception &error) {
+        note(QStringLiteral("  exception: %1").arg(QString::fromLocal8Bit(error.what())));
+    } catch (...) {
+        note(QStringLiteral("  unknown exception"));
     }
 
-    HdrOutput hdr;
-
-    if (!findHdrOutput(QString::fromWCharArray(info.szDevice), hdr)) {
-        note(QStringLiteral("  no HDR output named %1").arg(QString::fromWCharArray(info.szDevice)));
-        log.result(false, QStringLiteral("PrintWindow"));
-        return QPixmap();
-    }
-
-    const QPixmap grab = captureWindow(HWND(window), hdr);
-    log.result(!grab.isNull(), QStringLiteral("PrintWindow"));
-    return grab;
+    log.result(false, QStringLiteral("PrintWindow"));
+    return QPixmap();
 #else
     Q_UNUSED(window)
     return QPixmap();
@@ -1221,11 +1417,14 @@ QString HdrCapture::report()
 
 #ifdef Q_OS_WIN
     // Read first: the window timings below run os::grabWindow, which logs over it.
-    QString lastCapture;
-    QFile lastCaptureFile(lastCapturePath());
+    QStringList captureLogs;
 
-    if (lastCaptureFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        lastCapture = QString::fromUtf8(lastCaptureFile.readAll()).trimmed();
+    for (int number = 1; number <= captureLogCount; ++number) {
+        QFile file(captureLogPath(number));
+
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            captureLogs << QString::fromUtf8(file.readAll()).trimmed();
+        }
     }
 
     trace = &lines;
@@ -1347,8 +1546,15 @@ QString HdrCapture::report()
 
     trace = nullptr;
     reporting = false;
-    lines << QStringLiteral("Last capture in the app before this report:")
-          << (lastCapture.isEmpty() ? QStringLiteral("  none logged") : lastCapture);
+    lines << QStringLiteral("Last %1 captures in the app before this report, newest first:").arg(captureLogCount);
+
+    if (captureLogs.isEmpty()) {
+        lines << QStringLiteral("  none logged");
+    }
+
+    for (const QString &log : std::as_const(captureLogs)) {
+        lines << log;
+    }
 #else
     lines << QStringLiteral("HDR capture is Windows only.");
 #endif

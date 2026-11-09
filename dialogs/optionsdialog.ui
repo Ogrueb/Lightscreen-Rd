@@ -1076,6 +1076,50 @@ Warning: Cannot be used in tandem with the &quot;Copy screenshot to clipboard&qu
                </widget>
               </item>
               <item>
+               <layout class="QHBoxLayout" name="hdrCaptureLayout">
+                <item>
+                 <widget class="QLabel" name="hdrCaptureLabel">
+                  <property name="text">
+                   <string>&amp;HDR capture:</string>
+                  </property>
+                  <property name="buddy">
+                   <cstring>hdrCaptureComboBox</cstring>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QComboBox" name="hdrCaptureComboBox">
+                  <property name="toolTip">
+                   <string>On a monitor in HDR mode, Automatic reads the screen in HDR so browsers are not captured too bright. Off captures as Lightscreen always did.</string>
+                  </property>
+                  <item>
+                   <property name="text">
+                    <string>Automatic</string>
+                   </property>
+                  </item>
+                  <item>
+                   <property name="text">
+                    <string>Off</string>
+                   </property>
+                  </item>
+                 </widget>
+                </item>
+                <item>
+                 <spacer name="hdrCaptureSpacer">
+                  <property name="orientation">
+                   <enum>Qt::Horizontal</enum>
+                  </property>
+                  <property name="sizeHint" stdset="0">
+                   <size>
+                    <width>0</width>
+                    <height>0</height>
+                   </size>
+                  </property>
+                 </spacer>
+                </item>
+               </layout>
+              </item>
+              <item>
                <widget class="QCheckBox" name="magnifyCheckBox">
                 <property name="text">
                  <string>&amp;Magnify around the mouse in Area mode.</string>
@@ -1468,6 +1512,7 @@ Lightscreen was created by &lt;a href=&quot;https://ckaiser.com.ar&quot;&gt;Chri
   <tabstop>saveAsCheckBox</tabstop>
   <tabstop>currentMonitorCheckBox</tabstop>
   <tabstop>cursorCheckBox</tabstop>
+  <tabstop>hdrCaptureComboBox</tabstop>
   <tabstop>magnifyCheckBox</tabstop>
   <tabstop>optiPngCheckBox</tabstop>
   <tabstop>optimizerComboBox</tabstop>

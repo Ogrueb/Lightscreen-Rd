@@ -448,6 +448,16 @@ void Screenshot::grabDesktop()
         // there (bug 9); anything else, or a failure, keeps Qt's grab.
         QPixmap grab = HdrCapture::grabScreen(HdrCapture::deviceName(screen));
 
+        // Optional extra check (options/hdrCheckAgainstGdi, off by default, settings file only): Qt's grab of the same
+        // screen as a second opinion, since GDI can only err bright.
+        if (!grab.isNull() && HdrCapture::checkAgainstGdi()) {
+            const QPixmap gdi = screen->grabWindow(0);
+
+            if (!HdrCapture::notBrighterThanGdi(grab.toImage(), gdi.toImage())) {
+                grab = gdi;
+            }
+        }
+
         if (grab.isNull()) {
             grab = screen->grabWindow(0);
         }
