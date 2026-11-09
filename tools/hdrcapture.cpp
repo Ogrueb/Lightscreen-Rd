@@ -473,7 +473,7 @@ Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11
 }
 
 // The output's composed desktop in FP16, in the panel's own orientation (see rotation).
-Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
+Fp16Image duplicateFrameOnce(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation, HRESULT *failure)
 {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -494,12 +494,10 @@ Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
     duplication->GetDesc(&duplicationDescription);
     *rotation = duplicationDescription.Rotation;
 
-    // The first frame of a new duplication normally comes at once and holds the whole desktop (LastPresentTime set).
-    // The duplicated surface is the current desktop on every successful acquire, so if no frame reports a present
-    // (a desktop where nothing redraws), the last one acquired is used rather than waiting longer or falling back to
-    // GDI, which in a browser's HDR state is the bug itself. At most 3 x 100 ms.
+    // The duplicated surface is the current desktop on every successful acquire, whether or not the frame reports a
+    // present, so the first frame acquired is used. A new duplication normally hands one over at once; at most
+    // 3 x 100 ms are waited.
     Fp16Image image;
-    Fp16Image unchanged;
 
     for (int attempt = 0; attempt < 3 && image.isNull(); ++attempt) {
         DXGI_OUTDUPL_FRAME_INFO info = {};
@@ -512,6 +510,7 @@ Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
         }
 
         if (TRACE_FAILED(result)) {
+            *failure = result;
             return Fp16Image();
         }
 
@@ -521,21 +520,29 @@ Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
                  .arg(info.AccumulatedFrames));
 
         if (SUCCEEDED(resource.As(&texture))) {
-            Fp16Image frame = readTexture(device.Get(), context.Get(), texture.Get());
-
-            if (info.LastPresentTime.QuadPart != 0) {
-                image = std::move(frame);
-            } else {
-                unchanged = std::move(frame);
-            }
+            image = readTexture(device.Get(), context.Get(), texture.Get());
         }
 
         duplication->ReleaseFrame();
     }
 
-    if (image.isNull() && !unchanged.isNull()) {
-        note(QStringLiteral("  no frame reported a present; using the last one acquired"));
-        return unchanged;
+    if (image.isNull()) {
+        *failure = DXGI_ERROR_WAIT_TIMEOUT;
+    }
+
+    return image;
+}
+
+// A duplication is lost (or delivers nothing) when the desktop switches mode, for instance when a browser changes its swap chain (and its
+// HDR state) or a full-screen app starts; a new one is made once before giving up.
+Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation)
+{
+    HRESULT failure = S_OK;
+    Fp16Image image = duplicateFrameOnce(hdr, rotation, &failure);
+
+    if (image.isNull() && (failure == DXGI_ERROR_ACCESS_LOST || failure == DXGI_ERROR_WAIT_TIMEOUT)) {
+        note(QStringLiteral("  no frame; trying a new duplication"));
+        image = duplicateFrameOnce(hdr, rotation, &failure);
     }
 
     return image;
@@ -844,6 +851,9 @@ QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
         note(QStringLiteral("  covered by another window"));
         return QPixmap();
     }
+
+    // The window picker closes just before this; wait for the desktop to be composed without it.
+    DwmFlush();
 
     DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
     const Fp16Image desktop = duplicateFrame(hdr, &rotation);
