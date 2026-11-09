@@ -42,7 +42,7 @@ QList<float> composed(QRgb colour, float sdrWhite)
              float(toLinear(qBlue(colour)) * sdrWhite) };
 }
 
-bool near(QRgb a, QRgb b)
+bool sameColour(QRgb a, QRgb b)
 {
     return qAbs(qRed(a) - qRed(b)) <= 1 && qAbs(qGreen(a) - qGreen(b)) <= 1 && qAbs(qBlue(a) - qBlue(b)) <= 1;
 }
@@ -82,12 +82,12 @@ private slots:
         const QImage right = HdrCapture::scRgbToSrgb(data.data(), int(colours.size()), 1, int(colours.size()) * 8, 5.0f);
 
         for (int i = 0; i < colours.size(); ++i) {
-            QVERIFY2(near(right.pixel(i, 0), colours.at(i)), qPrintable(QString::number(i)));
+            QVERIFY2(sameColour(right.pixel(i, 0), colours.at(i)), qPrintable(QString::number(i)));
         }
 
         const QImage overexposed = HdrCapture::scRgbToSrgb(data.data(), int(colours.size()), 1, int(colours.size()) * 8, 1.0f);
-        QVERIFY(near(overexposed.pixel(0, 0), qRgb(75, 255, 133)));
-        QVERIFY(near(overexposed.pixel(1, 0), qRgb(75, 83, 92)));
+        QVERIFY(sameColour(overexposed.pixel(0, 0), qRgb(75, 255, 133)));
+        QVERIFY(sameColour(overexposed.pixel(1, 0), qRgb(75, 83, 92)));
     }
 
     // HDR highlights above SDR white and colours outside sRGB (negative scRGB) are clipped, channel by channel.
