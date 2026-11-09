@@ -1127,7 +1127,7 @@ QPixmap HdrCapture::grabWindow(WId window)
 bool HdrCapture::uncovered(WId window)
 {
 #ifdef Q_OS_WIN
-    return uncovered(HWND(window), visibleBounds(HWND(window)));
+    return ::uncovered(HWND(window), visibleBounds(HWND(window)));
 #else
     Q_UNUSED(window)
     return false;
