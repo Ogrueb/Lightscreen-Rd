@@ -780,12 +780,91 @@ Fp16Image windowFrame(HWND window, const HdrOutput &hdr)
     return image;
 }
 
-// The window through Windows.Graphics.Capture, brought to the desktop's brightness: the part of the window that is on
+// The window from the desktop when it is uncovered, otherwise through Windows.Graphics.Capture, brought to the desktop's brightness: the part of the window that is on
 // screen is compared with the composed desktop (which has SDR white at the SDR white level, see duplicate()), and the
 // frame is scaled by what that comparison finds. Null when nothing of the window can be compared (covered, off
 // screen, rotated panel) or the comparison is not consistent, so the caller keeps PrintWindow.
-QPixmap captureWindow(HWND window, const HdrOutput &hdr)
+// The window's visible frame (DWM's extended frame bounds, without the shadow), or its window rectangle.
+RECT visibleBounds(HWND window)
 {
+    RECT bounds;
+
+    if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) {
+        GetWindowRect(window, &bounds);
+    }
+
+    return bounds;
+}
+
+// Whether no visible window lies above the window anywhere inside bounds. Conservative: any visible, uncloaked
+// window above it that overlaps counts, including transparent ones.
+bool uncovered(HWND window, const RECT &bounds)
+{
+    for (HWND above = GetWindow(window, GW_HWNDPREV); above; above = GetWindow(above, GW_HWNDPREV)) {
+        if (!IsWindowVisible(above) || IsIconic(above)) {
+            continue;
+        }
+
+        DWORD cloaked = 0;
+
+        if (SUCCEEDED(DwmGetWindowAttribute(above, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) {
+            continue;
+        }
+
+        const RECT other = visibleBounds(above);
+        RECT overlap;
+
+        if (IntersectRect(&overlap, &other, &bounds)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// A window that is wholly on this output and not covered is taken straight from the composed desktop: it is what
+// the screen shows, at the desktop's brightness, and Windows.Graphics.Capture (whose yellow border some Windows 11
+// builds draw whatever the app asks) is not needed. Null otherwise.
+QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
+{
+    const RECT bounds = visibleBounds(window);
+    const RECT &origin = hdr.description.DesktopCoordinates;
+    RECT inside;
+
+    if (IsIconic(window) || IsRectEmpty(&bounds) || !IntersectRect(&inside, &bounds, &origin)
+        || !EqualRect(&inside, &bounds)) {
+        note(QStringLiteral("  not wholly on this output"));
+        return QPixmap();
+    }
+
+    if (!uncovered(window, bounds)) {
+        note(QStringLiteral("  covered by another window"));
+        return QPixmap();
+    }
+
+    DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
+    const Fp16Image desktop = duplicateFrame(hdr, &rotation);
+
+    if (desktop.isNull() || (rotation != DXGI_MODE_ROTATION_IDENTITY && rotation != DXGI_MODE_ROTATION_UNSPECIFIED)
+        || desktop.width != origin.right - origin.left || desktop.height != origin.bottom - origin.top) {
+        note(QStringLiteral("  no usable desktop frame (rotation %1)").arg(int(rotation)));
+        return QPixmap();
+    }
+
+    const int x = bounds.left - origin.left;
+    const int y = bounds.top - origin.top;
+    const uchar *start = reinterpret_cast<const uchar *>(desktop.pixels.data()) + qsizetype(y) * desktop.bytesPerLine()
+                         + qsizetype(x) * 8;
+    const QImage image = HdrCapture::scRgbToSrgb(start, bounds.right - bounds.left, bounds.bottom - bounds.top,
+                                                 desktop.bytesPerLine(), hdr.sdrWhite);
+    note(QStringLiteral("  cropped from the desktop at %1,%2, divided by the SDR white level %3")
+             .arg(x).arg(y).arg(hdr.sdrWhite));
+    return image.isNull() ? QPixmap() : QPixmap::fromImage(image);
+}
+
+QPixmap calibratedWindow(HWND window, const HdrOutput &hdr)
+{
+    note(QStringLiteral(" Windows.Graphics.Capture:"));
     const Fp16Image frame = windowFrame(window, hdr);
 
     if (frame.isNull()) {
@@ -832,6 +911,13 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
     const QImage image = HdrCapture::scRgbToSrgb(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(),
                                                  white);
     return image.isNull() ? QPixmap() : QPixmap::fromImage(image);
+}
+
+QPixmap captureWindow(HWND window, const HdrOutput &hdr)
+{
+    note(QStringLiteral(" Desktop duplication, uncovered window:"));
+    const QPixmap cropped = cropDesktop(window, hdr);
+    return cropped.isNull() ? calibratedWindow(window, hdr) : cropped;
 }
 } // namespace
 #endif
@@ -986,10 +1072,11 @@ QString HdrCapture::report()
                 return TRUE;
             }
 
-            note(QStringLiteral(" Windows.Graphics.Capture:"));
             QElapsedTimer timer;
             timer.start();
+            const qsizetype start = trace->size();
             const QPixmap grab = captureWindow(window, hdr);
+            const bool cropped = trace->mid(start).filter(QStringLiteral("cropped from the desktop")).size() > 0;
             const qint64 hdrTime = timer.elapsed();
             QStringList *const saved = trace;
             trace = nullptr; // the whole path again, untraced
@@ -998,6 +1085,12 @@ QString HdrCapture::report()
             trace = saved;
             note(grab.isNull() ? QStringLiteral("  -> failed, PrintWindow is used") : QStringLiteral("  -> used"));
             note(QStringLiteral("  time: %1 ms (whole os::grabWindow, HDR path included: %2 ms)").arg(hdrTime).arg(timer.elapsed()));
+
+            if (cropped) {
+                note(QStringLiteral(" For comparison, the covered-window path:"));
+                note(calibratedWindow(window, hdr).isNull() ? QStringLiteral("  -> would fail") : QStringLiteral("  -> would work"));
+            }
+
             return TRUE;
         },
         0);

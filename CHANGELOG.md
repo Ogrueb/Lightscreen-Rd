@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Bug
 
 ### Fixed
 
-- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in every capture mode. On such a monitor the desktop is now read through DXGI desktop duplication and scaled by Windows' SDR white level, so it is captured as it appears; HDR highlights above SDR white are clipped. A window is read through Windows.Graphics.Capture and calibrated against the desktop where it is visible (each window comes with its own brightness scale); a mostly covered window keeps the old capture. On Windows 11 the yellow capture border is turned off (bug 9).
+- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in every capture mode. On such a monitor the desktop is now read through DXGI desktop duplication and scaled by Windows' SDR white level, so it is captured as it appears; HDR highlights above SDR white are clipped. A window that is wholly on screen and uncovered is cut from that desktop capture. A covered window is read through Windows.Graphics.Capture and calibrated against the desktop where it is visible (each window comes with its own brightness scale); a mostly covered window keeps the old capture. Only a covered window can show Windows' yellow capture border briefly, on Windows builds that ignore the request to hide it (bug 9).
 
 ## [3.0.0] - 2026-10-29
 
