@@ -36,7 +36,10 @@
 #include <tools/hdrcapture.h>
 #include <tools/os.h>
 
+#include <QDateTime>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFloat16>
 #include <QGuiApplication>
 #include <QHash>
@@ -913,6 +916,50 @@ QPixmap calibratedWindow(HWND window, const HdrOutput &hdr)
     return image.isNull() ? QPixmap() : QPixmap::fromImage(image);
 }
 
+// The trace of the app's last capture, kept in the temp folder so that `--hdr-report` (another process) can show
+// which path a real capture took and why. Only when no report is tracing already.
+QString lastCapturePath()
+{
+    return QDir(QDir::tempPath()).filePath(QStringLiteral("lightscreen-hdr-last-capture.txt"));
+}
+
+class CaptureLog
+{
+public:
+    explicit CaptureLog(const QString &what)
+        : mActive(!trace)
+    {
+        if (mActive) {
+            trace = &mLines;
+            note(QStringLiteral("%1, %2").arg(what, QDateTime::currentDateTime().toString(Qt::ISODateWithMs)));
+        }
+    }
+
+    ~CaptureLog()
+    {
+        if (!mActive) {
+            return;
+        }
+
+        trace = nullptr;
+        QFile file(lastCapturePath());
+
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            file.write(mLines.join(QLatin1Char('\n')).toUtf8());
+            file.write("\n");
+        }
+    }
+
+    void result(bool used, const QString &fallback)
+    {
+        note(used ? QStringLiteral("  -> used") : QStringLiteral("  -> failed, %1 is used").arg(fallback));
+    }
+
+private:
+    QStringList mLines;
+    bool mActive;
+};
+
 QPixmap captureWindow(HWND window, const HdrOutput &hdr)
 {
     note(QStringLiteral(" Desktop duplication, uncovered window:"));
@@ -947,8 +994,18 @@ QString HdrCapture::deviceName(const QScreen *screen)
 QPixmap HdrCapture::grabScreen(const QString &deviceName)
 {
 #ifdef Q_OS_WIN
+    CaptureLog log(QStringLiteral("Screen capture of %1").arg(deviceName));
     HdrOutput hdr;
-    return findHdrOutput(deviceName, hdr) ? duplicate(hdr) : QPixmap();
+
+    if (!findHdrOutput(deviceName, hdr)) {
+        note(QStringLiteral("  no HDR output named %1").arg(deviceName));
+        log.result(false, QStringLiteral("Qt's grab"));
+        return QPixmap();
+    }
+
+    const QPixmap grab = duplicate(hdr);
+    log.result(!grab.isNull(), QStringLiteral("Qt's grab"));
+    return grab;
 #else
     Q_UNUSED(deviceName)
     return QPixmap();
@@ -958,16 +1015,28 @@ QPixmap HdrCapture::grabScreen(const QString &deviceName)
 QPixmap HdrCapture::grabWindow(WId window)
 {
 #ifdef Q_OS_WIN
+    CaptureLog log(QStringLiteral("Window capture"));
     HMONITOR monitor = MonitorFromWindow(HWND(window), MONITOR_DEFAULTTONULL);
     MONITORINFOEXW info = {};
     info.cbSize = sizeof(info);
 
     if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+        note(QStringLiteral("  no monitor"));
+        log.result(false, QStringLiteral("PrintWindow"));
         return QPixmap();
     }
 
     HdrOutput hdr;
-    return findHdrOutput(QString::fromWCharArray(info.szDevice), hdr) ? captureWindow(HWND(window), hdr) : QPixmap();
+
+    if (!findHdrOutput(QString::fromWCharArray(info.szDevice), hdr)) {
+        note(QStringLiteral("  no HDR output named %1").arg(QString::fromWCharArray(info.szDevice)));
+        log.result(false, QStringLiteral("PrintWindow"));
+        return QPixmap();
+    }
+
+    const QPixmap grab = captureWindow(HWND(window), hdr);
+    log.result(!grab.isNull(), QStringLiteral("PrintWindow"));
+    return grab;
 #else
     Q_UNUSED(window)
     return QPixmap();
@@ -979,6 +1048,14 @@ QString HdrCapture::report()
     QStringList lines;
 
 #ifdef Q_OS_WIN
+    // Read first: the window timings below run os::grabWindow, which logs over it.
+    QString lastCapture;
+    QFile lastCaptureFile(lastCapturePath());
+
+    if (lastCaptureFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        lastCapture = QString::fromUtf8(lastCaptureFile.readAll()).trimmed();
+    }
+
     trace = &lines;
 
     for (QScreen *screen : QGuiApplication::screens()) {
@@ -1096,6 +1173,8 @@ QString HdrCapture::report()
         0);
 
     trace = nullptr;
+    lines << QStringLiteral("Last capture in the app before this report:")
+          << (lastCapture.isEmpty() ? QStringLiteral("  none logged") : lastCapture);
 #else
     lines << QStringLiteral("HDR capture is Windows only.");
 #endif

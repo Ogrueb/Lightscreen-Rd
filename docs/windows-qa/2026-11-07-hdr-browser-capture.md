@@ -10,3 +10,4 @@ To put Chrome in that other state on purpose, play an HDR video in it (for examp
 4. Capture the Chrome window with the window picker and with "Active window". Both match the screen, show the whole window with no pointer in the file, and no yellow border flashes, and have the same edges as before (no extra transparent or black margin). Repeat with Chrome partly covered by another window (less than half): the capture shows Chrome alone, at the right brightness (a yellow border may flash here if Windows ignores the borderless request; `--hdr-report` shows whether it was refused).
 5. Capture an Explorer window the same way: it matches the screen too (not darker, as in 3.0.1).
 6. Turn HDR off and capture the Chrome window: as before this change.
+7. If any capture comes out too bright or too dark, run `lightscreen --hdr-report` straight after it, before capturing again: the report ends with the trace of that capture.
