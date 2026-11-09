@@ -294,6 +294,12 @@ private slots:
         top(upper);
         QVERIFY(!HdrCapture::uncovered(WId(lower)));
 
+        // A thin strip over one edge (an auto-hidden taskbar) leaves the rest uncovered; the window is cut there.
+        SetWindowPos(upper, nullptr, 50, 298, 400, 2, SWP_NOZORDER | SWP_NOACTIVATE);
+        QVERIFY(HdrCapture::uncovered(WId(lower)));
+        SetWindowPos(upper, nullptr, 250, 150, 300, 200, SWP_NOZORDER | SWP_NOACTIVATE);
+        QVERIFY(!HdrCapture::uncovered(WId(lower)));
+
         BOOL cloak = TRUE;
 
         if (SUCCEEDED(DwmSetWindowAttribute(upper, DWMWA_CLOAK, &cloak, sizeof(cloak)))) {

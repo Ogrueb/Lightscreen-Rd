@@ -878,7 +878,15 @@ RECT visibleBounds(HWND window)
 
 // Whether no visible window lies above the window anywhere inside bounds. Conservative: any visible, uncloaked
 // window above it that overlaps counts, including transparent ones.
-bool uncovered(HWND window, const RECT &bounds, HWND *coveredBy = nullptr)
+// How far a window's frame may reach past the screen edge, or another window into its edge, and still be cut from
+// the desktop: a snapped or maximized window's frame can reach a pixel past the screen (seen: 1923x2161 on a
+// 2160-pixel-high output), and an auto-hidden taskbar keeps a 2-pixel strip on screen over the windows at that edge.
+// Those pixels are not the window's on screen anyway, so the window is cut there instead.
+const int edgeSlack = 8;
+
+// Narrows bounds by any strip of at most edgeSlack pixels along one of its edges that a window above covers; false
+// when a window above covers more than that.
+bool uncovered(HWND window, RECT &bounds, HWND *coveredBy = nullptr)
 {
     for (HWND above = GetWindow(window, GW_HWNDPREV); above; above = GetWindow(above, GW_HWNDPREV)) {
         if (!IsWindowVisible(above) || IsIconic(above)) {
@@ -894,7 +902,19 @@ bool uncovered(HWND window, const RECT &bounds, HWND *coveredBy = nullptr)
         const RECT other = visibleBounds(above);
         RECT overlap;
 
-        if (IntersectRect(&overlap, &other, &bounds)) {
+        if (!IntersectRect(&overlap, &other, &bounds)) {
+            continue;
+        }
+
+        if (overlap.top >= bounds.bottom - edgeSlack) {
+            bounds.bottom = overlap.top;
+        } else if (overlap.bottom <= bounds.top + edgeSlack) {
+            bounds.top = overlap.bottom;
+        } else if (overlap.left >= bounds.right - edgeSlack) {
+            bounds.right = overlap.left;
+        } else if (overlap.right <= bounds.left + edgeSlack) {
+            bounds.left = overlap.right;
+        } else {
             if (coveredBy) {
                 *coveredBy = above;
             }
@@ -903,7 +923,7 @@ bool uncovered(HWND window, const RECT &bounds, HWND *coveredBy = nullptr)
         }
     }
 
-    return true;
+    return !IsRectEmpty(&bounds);
 }
 
 // A window that is wholly on this output and not covered is taken straight from the composed desktop: it is what
@@ -915,14 +935,10 @@ QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
     RECT bounds = visibleBounds(window);
     RECT inside;
 
-    // A snapped or maximized window's frame can reach a pixel or so past the screen edge (seen: 1923x2161 on a
-    // 2160-pixel-high output); that sliver is not shown anyway, so the window is cut at the edge. A window further
-    // off screen is left to Windows.Graphics.Capture, which has the hidden part.
-    const int overshoot = 8;
-
+    // A window further off screen than edgeSlack is left to Windows.Graphics.Capture, which has the hidden part.
     if (IsIconic(window) || IsRectEmpty(&bounds) || !IntersectRect(&inside, &bounds, &origin)
-        || inside.left - bounds.left > overshoot || inside.top - bounds.top > overshoot
-        || bounds.right - inside.right > overshoot || bounds.bottom - inside.bottom > overshoot) {
+        || inside.left - bounds.left > edgeSlack || inside.top - bounds.top > edgeSlack
+        || bounds.right - inside.right > edgeSlack || bounds.bottom - inside.bottom > edgeSlack) {
         note(QStringLiteral("  not wholly on this output (frame %1,%2 to %3,%4)")
                  .arg(bounds.left).arg(bounds.top).arg(bounds.right).arg(bounds.bottom));
         return QPixmap();
@@ -935,8 +951,21 @@ QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
     }
 
     HWND coveredBy = nullptr;
+    const RECT before = bounds;
 
-    if (!uncovered(window, bounds, &coveredBy)) {
+    const bool shown = uncovered(window, bounds, &coveredBy);
+
+    if (shown && !EqualRect(&before, &bounds)) {
+        note(QStringLiteral("  edge strip under another window left out: %1x%2")
+                 .arg(bounds.right - bounds.left).arg(bounds.bottom - bounds.top));
+    }
+
+    if (!shown && !coveredBy) {
+        note(QStringLiteral("  nothing left uncovered"));
+        return QPixmap();
+    }
+
+    if (!shown) {
         if (trace) {
             wchar_t className[64] = {};
             wchar_t title[64] = {};
@@ -957,6 +986,7 @@ QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
 
                 CloseHandle(handle);
             }
+
             note(QStringLiteral("  covered by another window: \"%1\" (%2), %3,%4 to %5,%6, style %7, extended style %8, "
                                 "program %9")
                      .arg(QString::fromWCharArray(title), QString::fromWCharArray(className))
@@ -1174,7 +1204,8 @@ QPixmap HdrCapture::grabWindow(WId window)
 bool HdrCapture::uncovered(WId window)
 {
 #ifdef Q_OS_WIN
-    return ::uncovered(HWND(window), visibleBounds(HWND(window)));
+    RECT bounds = visibleBounds(HWND(window));
+    return ::uncovered(HWND(window), bounds);
 #else
     Q_UNUSED(window)
     return false;
