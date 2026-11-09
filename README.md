@@ -13,6 +13,7 @@ Settings and screenshot history from Lightscreen 2.5 carry over: Lightscreen Rd 
 - **Configurable uploader** in place of Imgur and pomf: upload URL, form field, optional headers, and where the link is in the reply (Options > Upload), with a "Test upload" button. A pomf URL from older settings is carried over.
 - **PNG optimization queue**, with oxipng or OptiPNG chosen in the options; one file at a time, the original replaced only on success, and pending files resumed after a restart. The Windows package includes both tools.
 - **Capture on mixed-DPI setups**: each screen is grabbed at its own scale, and area selection maps to exact pixels at fractional scaling.
+- **HDR monitors**: with HDR on, captures match what the screen shows; browsers used to come out several times too bright. The "HDR capture" option (Options tab) switches back to the plain capture, and `lightscreen --hdr-report` writes a diagnostic file to the desktop for bug reports.
 - **Update check** against this fork's GitHub Releases; no calls to the original author's server.
 - **Many bugs fixed**: see [docs/known-bugs.md](docs/known-bugs.md).
 - CI on Windows and Linux for every change, with a test suite (QtTest) and a release workflow.

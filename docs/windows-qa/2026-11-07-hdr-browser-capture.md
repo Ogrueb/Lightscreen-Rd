@@ -11,4 +11,6 @@ To put Chrome in that other state on purpose, play an HDR video in it (for examp
 5. Capture an Explorer window the same way: it matches the screen too (not darker, as in 3.0.1).
 6. Turn HDR off and capture the Chrome window: as before this change.
 7. A yellow border on an uncovered window means some other window (often an invisible overlay, such as a GPU overlay or a toast) counted as covering it, so the window went through Windows.Graphics.Capture; `--hdr-report` names the path each window took ("cropped from the desktop" or "covered by another window"). Note it rather than fail the step, unless no such window can be found.
-8. If any capture comes out too bright or too dark, run `lightscreen --hdr-report` straight after it, before capturing again: the report ends with the trace of that capture.
+8. Options tab: set "HDR capture" to Off, capture Chrome in its HDR state: as in 3.0.0 (too bright). Set it back to Automatic: right again.
+9. Crash tripwire: with the app closed, create an empty file `%TEMP%\lightscreen-hdr-capture-running` and start the app: a notice says HDR capture is now off, and the option shows Off. Set it back to Automatic.
+10. If any capture comes out too bright or too dark, run `lightscreen --hdr-report` straight after it, before capturing again: the report ends with the trace of that capture.
