@@ -903,8 +903,8 @@ bool uncovered(HWND window, const RECT &bounds)
 }
 
 // A window that is wholly on this output and not covered is taken straight from the composed desktop: it is what
-// the screen shows, at the desktop's brightness, and Windows.Graphics.Capture (whose yellow border some Windows 11
-// builds draw whatever the app asks) is not needed. Null otherwise.
+// the screen shows, at the desktop's brightness, and Windows.Graphics.Capture (whose yellow border Windows 10 and
+// some Windows 11 builds draw whatever the app asks) is not needed. Null otherwise.
 QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
 {
     const RECT bounds = visibleBounds(window);
