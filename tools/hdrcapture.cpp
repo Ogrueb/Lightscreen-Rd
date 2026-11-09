@@ -878,7 +878,7 @@ RECT visibleBounds(HWND window)
 
 // Whether no visible window lies above the window anywhere inside bounds. Conservative: any visible, uncloaked
 // window above it that overlaps counts, including transparent ones.
-bool uncovered(HWND window, const RECT &bounds)
+bool uncovered(HWND window, const RECT &bounds, HWND *coveredBy = nullptr)
 {
     for (HWND above = GetWindow(window, GW_HWNDPREV); above; above = GetWindow(above, GW_HWNDPREV)) {
         if (!IsWindowVisible(above) || IsIconic(above)) {
@@ -895,6 +895,10 @@ bool uncovered(HWND window, const RECT &bounds)
         RECT overlap;
 
         if (IntersectRect(&overlap, &other, &bounds)) {
+            if (coveredBy) {
+                *coveredBy = above;
+            }
+
             return false;
         }
     }
@@ -930,8 +934,38 @@ QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
         bounds = inside;
     }
 
-    if (!uncovered(window, bounds)) {
-        note(QStringLiteral("  covered by another window"));
+    HWND coveredBy = nullptr;
+
+    if (!uncovered(window, bounds, &coveredBy)) {
+        if (trace) {
+            wchar_t className[64] = {};
+            wchar_t title[64] = {};
+            GetClassNameW(coveredBy, className, 64);
+            GetWindowTextW(coveredBy, title, 64);
+            const RECT other = visibleBounds(coveredBy);
+            DWORD process = 0;
+            GetWindowThreadProcessId(coveredBy, &process);
+            QString program = QString::number(process);
+
+            if (HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process)) {
+                wchar_t path[MAX_PATH] = {};
+                DWORD size = MAX_PATH;
+
+                if (QueryFullProcessImageNameW(handle, 0, path, &size)) {
+                    program = QString::fromWCharArray(path, int(size)).section(QLatin1Char('\\'), -1);
+                }
+
+                CloseHandle(handle);
+            }
+            note(QStringLiteral("  covered by another window: \"%1\" (%2), %3,%4 to %5,%6, style %7, extended style %8, "
+                                "program %9")
+                     .arg(QString::fromWCharArray(title), QString::fromWCharArray(className))
+                     .arg(other.left).arg(other.top).arg(other.right).arg(other.bottom)
+                     .arg(quint32(GetWindowLongW(coveredBy, GWL_STYLE)), 8, 16, QLatin1Char('0'))
+                     .arg(quint32(GetWindowLongW(coveredBy, GWL_EXSTYLE)), 8, 16, QLatin1Char('0'))
+                     .arg(program));
+        }
+
         return QPixmap();
     }
 
