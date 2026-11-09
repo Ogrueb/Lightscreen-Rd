@@ -1081,11 +1081,14 @@ QString lastCapturePath()
     return QDir(QDir::tempPath()).filePath(QStringLiteral("lightscreen-hdr-last-capture.txt"));
 }
 
+// Set while report() runs: its own untraced timing runs must not replace the log of the app's last capture.
+bool reporting = false;
+
 class CaptureLog
 {
 public:
     explicit CaptureLog(const QString &what)
-        : mActive(!trace)
+        : mActive(!trace && !reporting)
     {
         if (mActive) {
             trace = &mLines;
@@ -1226,6 +1229,7 @@ QString HdrCapture::report()
     }
 
     trace = &lines;
+    reporting = true;
 
     for (QScreen *screen : QGuiApplication::screens()) {
         const QString device = deviceName(screen);
@@ -1342,6 +1346,7 @@ QString HdrCapture::report()
         0);
 
     trace = nullptr;
+    reporting = false;
     lines << QStringLiteral("Last capture in the app before this report:")
           << (lastCapture.isEmpty() ? QStringLiteral("  none logged") : lastCapture);
 #else
