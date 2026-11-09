@@ -219,6 +219,7 @@ void OptionsDialog::loadSettings()
     ui.optiPngCheckBox->setChecked(Settings::value(settings(), "optimize").toBool());
     ui.closeHideCheckBox->setChecked(Settings::value(settings(), "closeHide").toBool());
     ui.currentMonitorCheckBox->setChecked(Settings::value(settings(), "currentMonitor").toBool());
+    ui.hdrCaptureComboBox->setCurrentIndex(qBound(0, Settings::value(settings(), "hdrCapture").toInt(), 1));
     ui.replaceCheckBox->setChecked(Settings::value(settings(), "replace").toBool());
     ui.uploadCheckBox->setChecked(Settings::value(settings(), "uploadAuto").toBool());
 
@@ -269,6 +270,12 @@ void OptionsDialog::loadSettings()
     //TODO: Cursor support on X11
     ui.cursorCheckBox->setVisible(false);
     ui.cursorCheckBox->setChecked(false);
+#endif
+
+#ifndef Q_OS_WIN
+    // HDR capture (bug 9) is Windows only; the value is kept and saved as it is.
+    ui.hdrCaptureLabel->setVisible(false);
+    ui.hdrCaptureComboBox->setVisible(false);
 #endif
     settings()->endGroup();
 
@@ -389,6 +396,7 @@ void OptionsDialog::saveSettings()
     }
 
     settings()->setValue("currentMonitor", ui.currentMonitorCheckBox->isChecked());
+    settings()->setValue("hdrCapture", ui.hdrCaptureComboBox->currentIndex());
     settings()->setValue("replace", ui.replaceCheckBox->isChecked());
 
     //Upload

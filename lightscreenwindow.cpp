@@ -47,6 +47,7 @@
 #include <dialogs/previewdialog.h>
 #include <dialogs/historydialog.h>
 
+#include <tools/hdrcapture.h>
 #include <tools/optimizer.h>
 #include <tools/os.h>
 #include <tools/screenshot.h>
@@ -108,6 +109,21 @@ LightscreenWindow::LightscreenWindow(QWidget *parent) :
     connect(ScreenshotManager::instance(), &ScreenshotManager::windowCleanup,     this, &LightscreenWindow::cleanup);
     connect(ScreenshotManager::instance(), &ScreenshotManager::activeCountChange, this, &LightscreenWindow::updateStatus);
     connect(ScreenshotManager::instance()->optimizer(), &Optimizer::pendingChanged, this, &LightscreenWindow::updateStatus);
+
+    // Bug 9 crash tripwire: a marker left by the last run means it died inside the HDR capture path (a graphics driver
+    // fault, which nothing in the app can catch), so HDR capture is turned off on this machine and the user is told
+    // once. The options' "HDR capture" setting turns it back on.
+    HdrCapture::setCrashMarkerPath(QDir(QDir::tempPath()).filePath(QStringLiteral("lightscreen-hdr-capture-running")));
+
+    if (HdrCapture::takeCrashMarker()) {
+        settings()->setValue("options/hdrCapture", 1);
+        QTimer::singleShot(0, this, [this] {
+            QMessageBox::warning(this, tr("Lightscreen Rd"),
+                                 tr("Lightscreen Rd stopped during an HDR capture the last time it ran, so HDR capture "
+                                    "is now off and screenshots are taken as in earlier versions. To try it again, "
+                                    "set \"HDR capture\" to Automatic on the Options tab of the options."));
+        });
+    }
 
     // PNG optimizations left over when the app last stopped run again.
     QTimer::singleShot(0, ScreenshotManager::instance()->optimizer(), &Optimizer::resume);
@@ -841,6 +857,9 @@ void LightscreenWindow::applySettings()
     }
 
     os::setStartup(Settings::value(settings(), "options/startup").toBool(), Settings::value(settings(), "options/startupHide").toBool());
+
+    HdrCapture::setEnabled(Settings::value(settings(), "options/hdrCapture").toInt() == 0);
+    HdrCapture::setCheckAgainstGdi(Settings::value(settings(), "options/hdrCheckAgainstGdi").toBool());
 }
 
 void LightscreenWindow::connectHotkeys()

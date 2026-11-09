@@ -384,6 +384,7 @@ void tst_Settings::dialogRoundTrip()
         setChecked(dialog, "urlClipboardCheckBox", true);
         setChecked(dialog, "optiPngCheckBox", true);
         setChecked(dialog, "currentMonitorCheckBox", true);
+        dialog.findChild<QComboBox *>("hdrCaptureComboBox")->setCurrentIndex(1);
         setChecked(dialog, "replaceCheckBox", true);
         setChecked(dialog, "uploadCheckBox", true);
 

@@ -47,6 +47,8 @@ const QHash<QString, QVariant> &fixedDefaults()
         { "options/disableHideAlert", false },
         { "options/disableUpdater", false },
         { "options/flip", false },
+        { "options/hdrCapture", 0 }, // 0 automatic, 1 off (bug 9); set to 1 after a crash in the HDR path.
+        { "options/hdrCheckAgainstGdi", false }, // Settings file only: compare each HDR screen capture with Qt's grab.
         { "options/hide", true },
         { "options/magnify", false },
         { "options/message", true },

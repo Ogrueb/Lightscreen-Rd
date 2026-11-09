@@ -33,6 +33,7 @@ options/cursor=false
 windows:options/cursor=true
 options/delay=0
 options/disableUpdater=false
+options/hdrCapture=0
 options/hide=true
 options/history=true
 options/magnify=false

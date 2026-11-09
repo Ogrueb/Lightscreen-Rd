@@ -4,11 +4,23 @@ Changes in Lightscreen Rd, the maintained fork of Lightscreen by Christian Kaise
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Bug numbers refer to `docs/known-bugs/`.
 
-## [3.0.1] - 2026-11-07
+## [3.0.1] - 2026-11-09
 
 ### Fixed
 
-- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in every capture mode. On such a monitor the desktop is now read through DXGI desktop duplication, and a window through Windows.Graphics.Capture, with Windows' SDR white level, so SDR content is captured as it appears; HDR highlights above SDR white are clipped (bug 9).
+- On a monitor in HDR mode, browsers (Chrome) could be captured several times too bright, washed out with coloured fringes, in every capture mode. On such a monitor the screen is now read in HDR (DXGI desktop duplication) and scaled by Windows' "SDR content brightness", so the capture matches the screen. A single window is cut from that screen capture when nothing covers it; when something does, it is read on its own (Windows.Graphics.Capture) and matched to the screen's brightness. Content brighter than SDR white (HDR video, HDR photos) is clipped to white, as in any 8-bit screenshot. SDR monitors capture exactly as before (bug 9).
+
+### Added
+
+- **HDR capture** option on the Options tab: Automatic (default) or Off. Off restores the plain capture on every monitor.
+- `lightscreen --hdr-report` writes `lightscreen-hdr-report.txt` to the desktop: each monitor's HDR state and brightness level, what each capture path sees, and the logs of the last five captures. Attach it to a bug report about brightness.
+- Safeguards on the HDR path: if the app stops during an HDR capture (a graphics driver fault), HDR capture is turned off at the next start and a notice says so; the option turns it back on. A failed allocation, an implausible brightness level or calibration, or a capture that comes out almost entirely white or black falls back to the plain capture. A second check against the plain capture can be turned on in the settings file (`options/hdrCheckAgainstGdi=true`); it costs a second capture of the screen.
+
+### Known issues
+
+- With HDR on, capturing a window that another window covers can flash a yellow border around it for a moment on Windows 10 and on Windows 11 builds that do not offer the setting to hide it. Windows draws the border; it never appears in the saved file. Uncovered windows do not flash (bug 46).
+- With HDR on, a window that is mostly covered, mostly off screen, on a rotated monitor, or spanning two monitors is captured the old way, which can be too bright for a browser in its HDR state (bug 47).
+- An HDR screen capture takes longer than a plain one (about 0.2 s at 4K). In rare cases Windows gives no HDR frame and the plain capture runs instead; `--hdr-report` run straight afterwards shows why (bug 48).
 
 ## [3.0.0] - 2026-10-29
 

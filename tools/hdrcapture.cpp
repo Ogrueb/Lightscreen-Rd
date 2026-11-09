@@ -21,21 +21,34 @@
 // The Windows headers come before the other Qt headers, so Qt's signals/slots/emit macros never meet the WinRT ones.
 #ifdef Q_OS_WIN
     #include <qt_windows.h>
-    #include <d3d11.h>
+    #include <d3d11_4.h>
+    #include <dwmapi.h>
     #include <dxgi1_6.h>
     #include <roapi.h>
     #include <windows.graphics.capture.h>
     #include <windows.graphics.capture.interop.h>
+    #include <windows.security.authorization.appcapabilityaccess.h>
     #include <windows.graphics.directx.direct3d11.interop.h>
     #include <wrl/client.h>
     #include <wrl/wrappers/corewrappers.h>
 #endif
 
 #include <tools/hdrcapture.h>
+#include <tools/os.h>
 
+#include <QDateTime>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QFloat16>
+#include <QGuiApplication>
+#include <QHash>
+#include <QRect>
+#include <QScreen>
+#include <QStringList>
 #include <QTransform>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -76,7 +89,7 @@ inline uchar encode(float linear, const std::array<uchar, LutSize> &lut)
 }
 } // namespace
 
-QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int bytesPerLine, float sdrWhite)
+QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int bytesPerLine, float sdrWhite, qint64 *flat)
 {
     if (!pixels || width <= 0 || height <= 0 || bytesPerLine < width * 8 || !(sdrWhite > 0)) {
         return QImage();
@@ -91,6 +104,7 @@ QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int by
     const auto &lut = srgbLut();
     const float scale = 1 / sdrWhite;
     std::vector<float> row(size_t(width) * 4);
+    qint64 flatPixels = 0;
 
     for (int y = 0; y < height; ++y) {
         const auto *source = reinterpret_cast<const qfloat16 *>(static_cast<const uchar *>(pixels) + qsizetype(y) * bytesPerLine);
@@ -100,16 +114,247 @@ QImage HdrCapture::scRgbToSrgb(const void *pixels, int width, int height, int by
 
         for (int x = 0; x < width; ++x) {
             const float *p = row.data() + x * 4;
-            target[x] = qRgb(encode(p[0] * scale, lut), encode(p[1] * scale, lut), encode(p[2] * scale, lut));
+            const uchar r = encode(p[0] * scale, lut);
+            const uchar g = encode(p[1] * scale, lut);
+            const uchar b = encode(p[2] * scale, lut);
+            flatPixels += (r == g && g == b && (r == 0 || r == 255));
+            target[x] = qRgb(r, g, b);
         }
+    }
+
+    if (flat) {
+        *flat = flatPixels;
     }
 
     return image;
 }
 
+bool HdrCapture::plausibleSdrWhite(float sdrWhite)
+{
+    return sdrWhite >= 1.0f && sdrWhite <= 12.5f;
+}
+
+bool HdrCapture::plausibleCalibration(float factor)
+{
+    return factor >= 0.2f && factor <= 10.0f;
+}
+
+bool HdrCapture::plausibleFlatShare(qint64 flat, qint64 pixels)
+{
+    return pixels <= 0 || flat * 100 < pixels * 98;
+}
+
+namespace {
+bool gdiCheck = false;
+}
+
+void HdrCapture::setCheckAgainstGdi(bool on)
+{
+    gdiCheck = on;
+}
+
+bool HdrCapture::checkAgainstGdi()
+{
+    return gdiCheck;
+}
+
+bool HdrCapture::notBrighterThanGdi(const QImage &hdr, const QImage &gdi)
+{
+    if (hdr.isNull() || gdi.isNull() || hdr.size() != gdi.size()) {
+        return true;
+    }
+
+    const QImage a = hdr.convertToFormat(QImage::Format_RGB32);
+    const QImage b = gdi.convertToFormat(QImage::Format_RGB32);
+    qint64 sumA = 0;
+    qint64 sumB = 0;
+    qint64 count = 0;
+
+    // Every 4th pixel of every 4th row is plenty for a mean.
+    for (int y = 0; y < a.height(); y += 4) {
+        const QRgb *lineA = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+        const QRgb *lineB = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+
+        for (int x = 0; x < a.width(); x += 4) {
+            sumA += qRed(lineA[x]) + qGreen(lineA[x]) + qBlue(lineA[x]);
+            sumB += qRed(lineB[x]) + qGreen(lineB[x]) + qBlue(lineB[x]);
+            ++count;
+        }
+    }
+
+    // Allowed: 2 levels per channel on average, for rounding and a frame's difference in content.
+    return sumA <= sumB + count * 3 * 2;
+}
+
+QString HdrCapture::describeScRgb(const void *pixels, int width, int height, int bytesPerLine)
+{
+    if (!pixels || width <= 0 || height <= 0 || bytesPerLine < width * 8) {
+        return QStringLiteral("  (no pixels)");
+    }
+
+    QHash<quint64, int> counts;
+    float maxChannel = 0;
+    std::vector<float> row(size_t(width) * 4);
+
+    for (int y = 0; y < height; ++y) {
+        const auto *source = reinterpret_cast<const qfloat16 *>(static_cast<const uchar *>(pixels) + qsizetype(y) * bytesPerLine);
+        qFloatFromFloat16(row.data(), source, qsizetype(width) * 4);
+
+        for (int x = 0; x < width; ++x) {
+            const float *p = row.data() + x * 4;
+            maxChannel = qMax(maxChannel, qMax(p[0], qMax(p[1], p[2])));
+            // The raw 16-bit values identify a colour exactly.
+            const quint16 *raw = reinterpret_cast<const quint16 *>(source + x * 4);
+            ++counts[quint64(raw[0]) | (quint64(raw[1]) << 16) | (quint64(raw[2]) << 32)];
+        }
+    }
+
+    QList<QPair<int, quint64>> sorted;
+
+    for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+        sorted.append({ it.value(), it.key() });
+    }
+
+    std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+
+    QStringList lines;
+    lines << QStringLiteral("  max channel %1; most common colours (scRGB, share of pixels):").arg(maxChannel);
+
+    for (int i = 0; i < qMin(8, int(sorted.size())); ++i) {
+        const quint64 key = sorted.at(i).second;
+        float rgb[3];
+
+        for (int c = 0; c < 3; ++c) {
+            const quint16 bits = quint16(key >> (16 * c));
+            qfloat16 value;
+            std::memcpy(&value, &bits, sizeof(bits));
+            rgb[c] = float(value);
+        }
+
+        lines << QStringLiteral("    %1 %2 %3  %4%")
+                     .arg(rgb[0], 0, 'f', 4)
+                     .arg(rgb[1], 0, 'f', 4)
+                     .arg(rgb[2], 0, 'f', 4)
+                     .arg(100.0 * sorted.at(i).first / (qint64(width) * height), 0, 'f', 1);
+    }
+
+    return lines.join(QLatin1Char('\n'));
+}
+
+float HdrCapture::matchScale(const void *window, int width, int height, int bytesPerLine, const void *desktop,
+                             int desktopWidth, int desktopHeight, int desktopBytesPerLine, const QPoint &offset)
+{
+    if (!window || !desktop || width <= 0 || height <= 0 || desktopWidth <= 0 || desktopHeight <= 0
+        || bytesPerLine < width * 8 || desktopBytesPerLine < desktopWidth * 8) {
+        return 0;
+    }
+
+    // The overlap of the window, placed at offset, with the desktop, in window coordinates.
+    const QRect overlap = QRect(0, 0, width, height) & QRect(-offset, QSize(desktopWidth, desktopHeight));
+
+    if (overlap.isEmpty()) {
+        return 0;
+    }
+
+    // Per pixel, desktop / window brightness, binned on a log scale (1/32 of a stop); covered or changed pixels scatter
+    // across the bins, the visible part of the window piles up in one. Dark pixels are too noisy to count.
+    constexpr int BinsPerStop = 32;
+    constexpr int Stops = 8; // ratios from 1/256 to 256
+    std::vector<int> bins(size_t(2 * Stops * BinsPerStop + 1), 0);
+    std::vector<double> sums(bins.size(), 0);
+    std::vector<float> windowRow(size_t(width) * 4);
+    std::vector<float> desktopRow(size_t(desktopWidth) * 4);
+    int compared = 0;
+
+    for (int y = overlap.top(); y <= overlap.bottom(); y += 2) {
+        qFloatFromFloat16(windowRow.data(),
+                          reinterpret_cast<const qfloat16 *>(static_cast<const uchar *>(window) + qsizetype(y) * bytesPerLine),
+                          qsizetype(width) * 4);
+        qFloatFromFloat16(desktopRow.data(),
+                          reinterpret_cast<const qfloat16 *>(static_cast<const uchar *>(desktop)
+                                                             + qsizetype(y + offset.y()) * desktopBytesPerLine),
+                          qsizetype(desktopWidth) * 4);
+
+        for (int x = overlap.left(); x <= overlap.right(); x += 2) {
+            const float *w = windowRow.data() + x * 4;
+            const float *d = desktopRow.data() + (x + offset.x()) * 4;
+            const float windowLight = w[0] + w[1] + w[2];
+            const float desktopLight = d[0] + d[1] + d[2];
+
+            if (!(windowLight > 0.15f) || !(desktopLight > 0)) {
+                continue;
+            }
+
+            const double ratio = double(desktopLight) / windowLight;
+            const int bin = int(std::lround(std::log2(ratio) * BinsPerStop)) + Stops * BinsPerStop;
+
+            if (bin < 0 || bin >= int(bins.size())) {
+                continue;
+            }
+
+            ++bins[size_t(bin)];
+            sums[size_t(bin)] += ratio;
+            ++compared;
+        }
+    }
+
+    if (compared < 50) {
+        return 0;
+    }
+
+    // The fullest bin with its neighbours (a ratio near a bin edge splits across two).
+    int best = 0;
+
+    for (int i = 1; i < int(bins.size()); ++i) {
+        if (bins[size_t(i)] > bins[size_t(best)]) {
+            best = i;
+        }
+    }
+
+    int count = 0;
+    double sum = 0;
+
+    for (int i = qMax(0, best - 1); i <= qMin(int(bins.size()) - 1, best + 1); ++i) {
+        count += bins[size_t(i)];
+        sum += sums[size_t(i)];
+    }
+
+    // Most of what was compared has to agree, or the window is mostly covered and the result would be a guess.
+    if (count * 2 < compared) {
+        return 0;
+    }
+
+    return float(sum / count);
+}
+
 #ifdef Q_OS_WIN
 namespace {
 using Microsoft::WRL::ComPtr;
+
+// Set while HdrCapture::report() runs: every failed call and what each capture read is noted here.
+QStringList *trace = nullptr;
+
+void note(const QString &text)
+{
+    if (trace) {
+        trace->append(text);
+    }
+}
+
+bool failedTraced(HRESULT result, const char *call, int line)
+{
+    if (FAILED(result)) {
+        note(QStringLiteral("  failed (line %1): %2 -> 0x%3")
+                 .arg(line)
+                 .arg(QLatin1String(call))
+                 .arg(quint32(result), 8, 16, QLatin1Char('0')));
+        return true;
+    }
+
+    return false;
+}
+
+#define TRACE_FAILED(call) failedTraced((call), #call, __LINE__)
 
 // The "SDR content brightness" of the monitor with this GDI device name, in scRGB units (1.0 = 80 nits), or 0.
 float sdrWhiteLevel(const QString &deviceName)
@@ -172,7 +417,7 @@ bool findHdrOutput(const QString &deviceName, HdrOutput &result)
 {
     ComPtr<IDXGIFactory1> factory;
 
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+    if (TRACE_FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
         return false;
     }
 
@@ -185,19 +430,36 @@ bool findHdrOutput(const QString &deviceName, HdrOutput &result)
             ComPtr<IDXGIOutput6> output6;
             DXGI_OUTPUT_DESC1 description;
 
-            if (FAILED(output.As(&output6)) || FAILED(output6->GetDesc1(&description))
+            if (TRACE_FAILED(output.As(&output6)) || TRACE_FAILED(output6->GetDesc1(&description))
                 || QString::fromWCharArray(description.DeviceName) != deviceName) {
                 continue;
             }
 
             // An SDR monitor keeps the old capture, as before.
+            const float sdrWhite = sdrWhiteLevel(deviceName);
+            note(QStringLiteral("  DXGI output %1: colour space %2 (12 = HDR), desktop %3,%4 %5x%6, bits %7, "
+                                "SDR white level %8 (x80 nits), max luminance %9 nits")
+                     .arg(deviceName)
+                     .arg(int(description.ColorSpace))
+                     .arg(description.DesktopCoordinates.left)
+                     .arg(description.DesktopCoordinates.top)
+                     .arg(description.DesktopCoordinates.right - description.DesktopCoordinates.left)
+                     .arg(description.DesktopCoordinates.bottom - description.DesktopCoordinates.top)
+                     .arg(description.BitsPerColor)
+                     .arg(sdrWhite)
+                     .arg(description.MaxLuminance));
+
+            if (description.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709) {
+                // Reported as possible but not yet seen; logged so a report shows it if a machine has it.
+                note(QStringLiteral("  colour space 17 (scRGB desktop) is not handled; Qt's grab is used"));
+            }
+
             if (description.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
                 return false;
             }
 
-            const float sdrWhite = sdrWhiteLevel(deviceName);
-
-            if (!(sdrWhite > 0)) {
+            if (!HdrCapture::plausibleSdrWhite(sdrWhite)) {
+                note(QStringLiteral("  SDR white level %1 is outside 1.0 to 12.5: not believed").arg(sdrWhite));
                 return false;
             }
 
@@ -212,17 +474,98 @@ bool findHdrOutput(const QString &deviceName, HdrOutput &result)
     return false;
 }
 
-// Copies an FP16 texture to the CPU and converts it; only the top left contentSize when it is given.
-QImage readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Texture2D *texture, float sdrWhite,
-                   QSize contentSize = QSize())
+// One D3D11 device per adapter for the process lifetime (creating one costs tens of milliseconds per capture). A
+// removed device (driver update, GPU reset) is replaced on the next capture.
+bool deviceFor(IDXGIAdapter1 *adapter, ComPtr<ID3D11Device> &device, ComPtr<ID3D11DeviceContext> &context)
 {
+    struct Cached {
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+    };
+    static QHash<quint64, Cached> cache;
+
+    DXGI_ADAPTER_DESC1 description;
+
+    if (TRACE_FAILED(adapter->GetDesc1(&description))) {
+        return false;
+    }
+
+    const quint64 key = (quint64(quint32(description.AdapterLuid.HighPart)) << 32) | description.AdapterLuid.LowPart;
+    auto cached = cache.find(key);
+
+    if (cached != cache.end() && cached->device->GetDeviceRemovedReason() != S_OK) {
+        note(QStringLiteral("  cached device removed; creating a new one"));
+        cache.erase(cached);
+        cached = cache.end();
+    }
+
+    if (cached == cache.end()) {
+        QElapsedTimer timer;
+        timer.start();
+        Cached created;
+
+        if (TRACE_FAILED(D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                           nullptr, 0, D3D11_SDK_VERSION, &created.device, nullptr,
+                                           &created.context))) {
+            return false;
+        }
+
+        // Windows.Graphics.Capture's free-threaded frame pool uses the device from its own threads.
+        ComPtr<ID3D11Multithread> multithread;
+
+        if (SUCCEEDED(created.context.As(&multithread))) {
+            multithread->SetMultithreadProtected(TRUE);
+        }
+
+        cached = cache.insert(key, created);
+        note(QStringLiteral("  D3D11 device created in %1 ms (kept for later captures)").arg(timer.elapsed()));
+    }
+
+    device = cached->device;
+    context = cached->context;
+    return true;
+}
+
+// FP16 RGBA pixels copied off the GPU, rows width * 8 bytes apart.
+struct Fp16Image {
+    std::vector<qfloat16> pixels;
+    int width = 0;
+    int height = 0;
+
+    bool isNull() const { return pixels.empty(); }
+    int bytesPerLine() const { return width * 8; }
+};
+
+// Copies an FP16 texture to the CPU: only region when it is given (it must lie inside the texture), so a window
+// or the content of a larger texture costs its own size, not the whole output's.
+Fp16Image readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Texture2D *texture,
+                      QRect region = QRect())
+{
+    QElapsedTimer timer;
+    timer.start();
     D3D11_TEXTURE2D_DESC description;
     texture->GetDesc(&description);
 
     if (description.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
-        return QImage();
+        note(QStringLiteral("  texture format %1 is not FP16").arg(int(description.Format)));
+        return Fp16Image();
     }
 
+    const QRect whole(0, 0, int(description.Width), int(description.Height));
+
+    if (region.isNull()) {
+        region = whole;
+    }
+
+    if (region.isEmpty() || !whole.contains(region)) {
+        note(QStringLiteral("  region %1,%2 %3x%4 is not inside the %5x%6 texture")
+                 .arg(region.x()).arg(region.y()).arg(region.width()).arg(region.height())
+                 .arg(whole.width()).arg(whole.height()));
+        return Fp16Image();
+    }
+
+    description.Width = UINT(region.width());
+    description.Height = UINT(region.height());
     description.Usage = D3D11_USAGE_STAGING;
     description.BindFlags = 0;
     description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -232,82 +575,153 @@ QImage readTexture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Tex
 
     ComPtr<ID3D11Texture2D> staging;
 
-    if (FAILED(device->CreateTexture2D(&description, nullptr, &staging))) {
-        return QImage();
+    if (TRACE_FAILED(device->CreateTexture2D(&description, nullptr, &staging))) {
+        return Fp16Image();
     }
 
-    context->CopyResource(staging.Get(), texture);
+    const D3D11_BOX box = { UINT(region.left()), UINT(region.top()), 0, UINT(region.right() + 1),
+                            UINT(region.bottom() + 1), 1 };
+    context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture, 0, &box);
 
     D3D11_MAPPED_SUBRESOURCE mapped;
 
-    if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-        return QImage();
+    if (TRACE_FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return Fp16Image();
     }
 
-    int width = int(description.Width);
-    int height = int(description.Height);
+    Fp16Image image;
+    image.width = region.width();
+    image.height = region.height();
 
-    if (contentSize.isValid()) {
-        width = qMin(width, contentSize.width());
-        height = qMin(height, contentSize.height());
+    image.pixels.resize(size_t(image.width) * image.height * 4);
+
+    for (int y = 0; y < image.height; ++y) {
+        std::memcpy(image.pixels.data() + size_t(y) * image.width * 4,
+                    static_cast<const uchar *>(mapped.pData) + size_t(y) * mapped.RowPitch, size_t(image.width) * 8);
     }
 
-    QImage image = HdrCapture::scRgbToSrgb(mapped.pData, width, height, int(mapped.RowPitch), sdrWhite);
     context->Unmap(staging.Get(), 0);
+
+    if (trace) {
+        note(QStringLiteral("  texture %1x%2, read %3x%4 at %5,%6 in %7 ms").arg(whole.width()).arg(whole.height())
+                 .arg(image.width).arg(image.height).arg(region.x()).arg(region.y()).arg(timer.elapsed()));
+        note(HdrCapture::describeScRgb(image.pixels.data(), image.width, image.height, image.bytesPerLine()));
+    }
+
     return image;
 }
 
-QPixmap duplicate(const HdrOutput &hdr)
+// The output's composed desktop in FP16, in the panel's own orientation (see rotation).
+Fp16Image duplicateFrameOnce(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation, HRESULT *failure, const QRect &region)
 {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
 
-    if (FAILED(D3D11CreateDevice(hdr.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
-                                 D3D11_SDK_VERSION, &device, nullptr, &context))) {
-        return QPixmap();
+    if (!deviceFor(hdr.adapter.Get(), device, context)) {
+        return Fp16Image();
     }
 
     const DXGI_FORMAT formats[] = { DXGI_FORMAT_R16G16B16A16_FLOAT };
     ComPtr<IDXGIOutputDuplication> duplication;
 
-    if (FAILED(hdr.output->DuplicateOutput1(device.Get(), 0, 1, formats, &duplication))) {
-        return QPixmap();
+    if (TRACE_FAILED(hdr.output->DuplicateOutput1(device.Get(), 0, 1, formats, &duplication))) {
+        return Fp16Image();
     }
 
-    // The first frame of a new duplication holds the whole desktop; one that only moved the pointer has no image.
-    QImage image;
+    DXGI_OUTDUPL_DESC duplicationDescription;
+    duplication->GetDesc(&duplicationDescription);
+    *rotation = duplicationDescription.Rotation;
 
-    for (int attempt = 0; attempt < 5 && image.isNull(); ++attempt) {
+    // The duplicated surface is the current desktop on every successful acquire, whether or not the frame reports a
+    // present, so the first frame acquired is used. A new duplication normally hands one over at once; at most
+    // 3 x 100 ms are waited.
+    Fp16Image image;
+
+    for (int attempt = 0; attempt < 3 && image.isNull(); ++attempt) {
         DXGI_OUTDUPL_FRAME_INFO info = {};
         ComPtr<IDXGIResource> resource;
-        const HRESULT result = duplication->AcquireNextFrame(500, &info, &resource);
+        const HRESULT result = duplication->AcquireNextFrame(100, &info, &resource);
 
         if (result == DXGI_ERROR_WAIT_TIMEOUT) {
+            note(QStringLiteral("  AcquireNextFrame: timeout"));
             continue;
         }
 
-        if (FAILED(result)) {
-            return QPixmap();
+        if (TRACE_FAILED(result)) {
+            *failure = result;
+            return Fp16Image();
         }
 
         ComPtr<ID3D11Texture2D> texture;
+        note(QStringLiteral("  frame: LastPresentTime %1, AccumulatedFrames %2")
+                 .arg(info.LastPresentTime.QuadPart)
+                 .arg(info.AccumulatedFrames));
 
-        if (info.LastPresentTime.QuadPart != 0 && SUCCEEDED(resource.As(&texture))) {
-            image = readTexture(device.Get(), context.Get(), texture.Get(), hdr.sdrWhite);
+        if (SUCCEEDED(resource.As(&texture))) {
+            image = readTexture(device.Get(), context.Get(), texture.Get(), region);
         }
 
         duplication->ReleaseFrame();
     }
 
     if (image.isNull()) {
+        *failure = DXGI_ERROR_WAIT_TIMEOUT;
+    }
+
+    return image;
+}
+
+// A duplication is lost (or delivers nothing) when the desktop switches mode, for instance when a browser changes its swap chain (and its
+// HDR state) or a full-screen app starts; a new one is made once before giving up.
+// Only region of the panel when it is given (in the panel's orientation).
+Fp16Image duplicateFrame(const HdrOutput &hdr, DXGI_MODE_ROTATION *rotation, const QRect &region = QRect())
+{
+    HRESULT failure = S_OK;
+    Fp16Image image = duplicateFrameOnce(hdr, rotation, &failure, region);
+
+    if (image.isNull() && (failure == DXGI_ERROR_ACCESS_LOST || failure == DXGI_ERROR_WAIT_TIMEOUT)) {
+        note(QStringLiteral("  no frame; trying a new duplication"));
+        image = duplicateFrameOnce(hdr, rotation, &failure, region);
+    }
+
+    return image;
+}
+
+// scRgbToSrgb with the flat-image check: null, so the caller falls back, when 98 % or more of the pixels came out
+// pure black or white (a wrong scale).
+QImage convertChecked(const void *pixels, int width, int height, int bytesPerLine, float white)
+{
+    qint64 flat = 0;
+    const QImage image = HdrCapture::scRgbToSrgb(pixels, width, height, bytesPerLine, white, &flat);
+
+    if (!image.isNull() && !HdrCapture::plausibleFlatShare(flat, qint64(width) * height)) {
+        note(QStringLiteral("  %1 % of the pixels pure black or white: the scale looks wrong, not used")
+                 .arg(100.0 * flat / (qint64(width) * height), 0, 'f', 1));
+        return QImage();
+    }
+
+    return image;
+}
+
+QPixmap duplicate(const HdrOutput &hdr)
+{
+    DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
+    const Fp16Image frame = duplicateFrame(hdr, &rotation);
+
+    if (frame.isNull()) {
         return QPixmap();
     }
 
-    // The frame is in the panel's own orientation; turn it to the desktop's.
-    DXGI_OUTDUPL_DESC duplicationDescription;
-    duplication->GetDesc(&duplicationDescription);
+    QImage image = convertChecked(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(), hdr.sdrWhite);
 
-    switch (duplicationDescription.Rotation) {
+    if (image.isNull()) {
+        return QPixmap();
+    }
+
+    note(QStringLiteral("  divided by the SDR white level %1").arg(hdr.sdrWhite));
+
+    // The frame is in the panel's own orientation; turn it to the desktop's.
+    switch (rotation) {
     case DXGI_MODE_ROTATION_ROTATE90:
         image = image.transformed(QTransform().rotate(90));
         break;
@@ -324,6 +738,7 @@ QPixmap duplicate(const HdrOutput &hdr)
     const RECT &desktop = hdr.description.DesktopCoordinates;
 
     if (image.size() != QSize(desktop.right - desktop.left, desktop.bottom - desktop.top)) {
+        note(QStringLiteral("  size %1x%2 does not match the desktop").arg(image.width()).arg(image.height()));
         return QPixmap();
     }
 
@@ -340,71 +755,136 @@ void closeObject(const ComPtr<T> &object)
     }
 }
 
-// One frame of the window through Windows.Graphics.Capture (Windows 10 1903 and later), in FP16.
-QPixmap captureWindow(HWND window, const HdrOutput &hdr)
+// Windows 11 draws a yellow border around a window being captured unless the app has asked for borderless capture;
+// asked until Windows answers once per run. Windows 10 has no such request (and no way to hide the border).
+void requestBorderlessCapture()
+{
+    // Asked again on a later capture until one request completes (a first call can time out while the system is busy).
+    static bool answered = false;
+
+    if (answered) {
+        return;
+    }
+
+    namespace Capture = ABI::Windows::Graphics::Capture;
+    using AccessStatus = ABI::Windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+    using Microsoft::WRL::Wrappers::HStringReference;
+
+    ComPtr<Capture::IGraphicsCaptureAccessStatics> access;
+
+    if (TRACE_FAILED(RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureAccess).Get(),
+                                            IID_PPV_ARGS(&access)))) {
+        answered = true; // Windows 10: no such request
+        return;
+    }
+
+    ComPtr<ABI::Windows::Foundation::IAsyncOperation<AccessStatus>> operation;
+
+    if (TRACE_FAILED(access->RequestAccessAsync(Capture::GraphicsCaptureAccessKind_Borderless, &operation))) {
+        answered = true;
+        return;
+    }
+
+    ComPtr<ABI::Windows::Foundation::IAsyncInfo> info;
+
+    if (TRACE_FAILED(operation.As(&info))) {
+        return;
+    }
+
+    ABI::Windows::Foundation::AsyncStatus status = ABI::Windows::Foundation::AsyncStatus::Started;
+
+    for (int wait = 0; wait < 100 && status == ABI::Windows::Foundation::AsyncStatus::Started; ++wait) {
+        if (TRACE_FAILED(info->get_Status(&status))) {
+            return;
+        }
+
+        if (status == ABI::Windows::Foundation::AsyncStatus::Started) {
+            Sleep(10);
+        }
+    }
+
+    AccessStatus result = AccessStatus::AppCapabilityAccessStatus_DeniedBySystem;
+
+    if (status == ABI::Windows::Foundation::AsyncStatus::Completed) {
+        operation->GetResults(&result);
+        answered = true;
+    } else if (status != ABI::Windows::Foundation::AsyncStatus::Started) {
+        answered = true; // failed or cancelled: asking again will not change it
+    }
+
+    note(QStringLiteral("  borderless capture: async status %1, access %2").arg(int(status)).arg(int(result)));
+}
+
+// One frame of the window through Windows.Graphics.Capture (Windows 10 1903 and later), in FP16. Its scale is the
+// window's own: an SDR window comes with white at some level of Windows' choosing (2.0 on the owner's 400-nit
+// setting), a browser with its own HDR surface at another (5.0 there), so captureWindow calibrates it.
+Fp16Image windowFrame(HWND window, const HdrOutput &hdr)
 {
     namespace Capture = ABI::Windows::Graphics::Capture;
     namespace WinRtD3D = ABI::Windows::Graphics::DirectX::Direct3D11;
     using Microsoft::WRL::Wrappers::HStringReference;
 
+    requestBorderlessCapture();
+
     ComPtr<IGraphicsCaptureItemInterop> interop;
 
-    if (FAILED(RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem).Get(),
-                                      IID_PPV_ARGS(&interop)))) {
-        return QPixmap();
+    if (TRACE_FAILED(RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem).Get(),
+                                            IID_PPV_ARGS(&interop)))) {
+        return Fp16Image();
     }
 
     ComPtr<Capture::IGraphicsCaptureItem> item;
 
-    if (FAILED(interop->CreateForWindow(window, IID_PPV_ARGS(&item)))) {
-        return QPixmap();
+    if (TRACE_FAILED(interop->CreateForWindow(window, IID_PPV_ARGS(&item)))) {
+        return Fp16Image();
     }
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
 
-    if (FAILED(D3D11CreateDevice(hdr.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                 nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) {
-        return QPixmap();
+    if (!deviceFor(hdr.adapter.Get(), device, context)) {
+        return Fp16Image();
     }
 
     ComPtr<IDXGIDevice> dxgiDevice;
     ComPtr<IInspectable> inspectable;
     ComPtr<WinRtD3D::IDirect3DDevice> winrtDevice;
 
-    if (FAILED(device.As(&dxgiDevice)) || FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), &inspectable))
-        || FAILED(inspectable.As(&winrtDevice))) {
-        return QPixmap();
+    if (TRACE_FAILED(device.As(&dxgiDevice))
+        || TRACE_FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), &inspectable))
+        || TRACE_FAILED(inspectable.As(&winrtDevice))) {
+        return Fp16Image();
     }
 
     ComPtr<Capture::IDirect3D11CaptureFramePoolStatics2> poolStatics;
 
-    if (FAILED(RoGetActivationFactory(
+    if (TRACE_FAILED(RoGetActivationFactory(
             HStringReference(RuntimeClass_Windows_Graphics_Capture_Direct3D11CaptureFramePool).Get(),
             IID_PPV_ARGS(&poolStatics)))) {
-        return QPixmap();
+        return Fp16Image();
     }
 
     ABI::Windows::Graphics::SizeInt32 size = {};
     item->get_Size(&size);
 
     if (size.Width <= 0 || size.Height <= 0) {
-        return QPixmap();
+        note(QStringLiteral("  empty capture item"));
+        return Fp16Image();
     }
 
     ComPtr<Capture::IDirect3D11CaptureFramePool> pool;
 
-    if (FAILED(poolStatics->CreateFreeThreaded(winrtDevice.Get(),
-                                               ABI::Windows::Graphics::DirectX::DirectXPixelFormat_R16G16B16A16Float, 1,
-                                               size, &pool))) {
-        return QPixmap();
+    if (TRACE_FAILED(poolStatics->CreateFreeThreaded(winrtDevice.Get(),
+                                                     ABI::Windows::Graphics::DirectX::DirectXPixelFormat_R16G16B16A16Float,
+                                                     1, size, &pool))) {
+        return Fp16Image();
     }
 
     ComPtr<Capture::IGraphicsCaptureSession> session;
 
-    if (FAILED(pool->CreateCaptureSession(item.Get(), &session))) {
+    if (TRACE_FAILED(pool->CreateCaptureSession(item.Get(), &session))) {
         closeObject(pool);
-        return QPixmap();
+        return Fp16Image();
     }
 
     // No pointer in the capture (Windows 10 2004 and later), and no yellow border where Windows allows that.
@@ -417,22 +897,27 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
     ComPtr<Capture::IGraphicsCaptureSession3> session3;
 
     if (SUCCEEDED(session.As(&session3))) {
-        session3->put_IsBorderRequired(false);
+        TRACE_FAILED(session3->put_IsBorderRequired(false));
     }
 
-    QImage image;
+    Fp16Image image;
 
-    if (SUCCEEDED(session->StartCapture())) {
+    if (!TRACE_FAILED(session->StartCapture())) {
         // A free-threaded pool fills without a message loop; the first frame normally arrives within a few
         // milliseconds. A minimized window never sends one.
-        for (int wait = 0; wait < 100 && image.isNull(); ++wait) {
+        // 500 ms at most, generous for slower hardware.
+        for (int wait = 0; wait < 50 && image.isNull(); ++wait) {
             ComPtr<Capture::IDirect3D11CaptureFrame> frame;
 
-            if (FAILED(pool->TryGetNextFrame(&frame))) {
+            if (TRACE_FAILED(pool->TryGetNextFrame(&frame))) {
                 break;
             }
 
             if (!frame) {
+                if (wait == 49) {
+                    note(QStringLiteral("  no frame within 500 ms"));
+                }
+
                 Sleep(10);
                 continue;
             }
@@ -442,11 +927,12 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
             ComPtr<ID3D11Texture2D> texture;
             ABI::Windows::Graphics::SizeInt32 contentSize = {};
             frame->get_ContentSize(&contentSize);
+            note(QStringLiteral("  frame content %1x%2").arg(contentSize.Width).arg(contentSize.Height));
 
-            if (SUCCEEDED(frame->get_Surface(&surface)) && SUCCEEDED(surface.As(&access))
-                && SUCCEEDED(access->GetInterface(IID_PPV_ARGS(&texture)))) {
-                image = readTexture(device.Get(), context.Get(), texture.Get(), hdr.sdrWhite,
-                                    QSize(contentSize.Width, contentSize.Height));
+            if (!TRACE_FAILED(frame->get_Surface(&surface)) && !TRACE_FAILED(surface.As(&access))
+                && !TRACE_FAILED(access->GetInterface(IID_PPV_ARGS(&texture)))) {
+                image = readTexture(device.Get(), context.Get(), texture.Get(),
+                                    QRect(0, 0, contentSize.Width, contentSize.Height));
             }
 
             closeObject(frame);
@@ -459,17 +945,409 @@ QPixmap captureWindow(HWND window, const HdrOutput &hdr)
 
     closeObject(session);
     closeObject(pool);
+    return image;
+}
 
+// The window from the desktop when it is uncovered, otherwise through Windows.Graphics.Capture, brought to the desktop's brightness: the part of the window that is on
+// screen is compared with the composed desktop (which has SDR white at the SDR white level, see duplicate()), and the
+// frame is scaled by what that comparison finds. Null when nothing of the window can be compared (covered, off
+// screen, rotated panel) or the comparison is not consistent, so the caller keeps PrintWindow.
+// The window's visible frame (DWM's extended frame bounds, without the shadow), or its window rectangle.
+RECT visibleBounds(HWND window)
+{
+    RECT bounds;
+
+    if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) {
+        GetWindowRect(window, &bounds);
+    }
+
+    return bounds;
+}
+
+// Whether no visible window lies above the window anywhere inside bounds. Conservative: any visible, uncloaked
+// window above it that overlaps counts, including transparent ones.
+// How far a window's frame may reach past the screen edge, or another window into its edge, and still be cut from
+// the desktop: a snapped or maximized window's frame can reach a pixel past the screen (seen: 1923x2161 on a
+// 2160-pixel-high output), and an auto-hidden taskbar keeps a 2-pixel strip on screen over the windows at that edge.
+// Those pixels are not the window's on screen anyway, so the window is cut there instead.
+const int edgeSlack = 8;
+
+// Narrows bounds by any strip of at most edgeSlack pixels along one of its edges that a window above covers; false
+// when a window above covers more than that.
+bool uncovered(HWND window, RECT &bounds, HWND *coveredBy = nullptr)
+{
+    for (HWND above = GetWindow(window, GW_HWNDPREV); above; above = GetWindow(above, GW_HWNDPREV)) {
+        if (!IsWindowVisible(above) || IsIconic(above)) {
+            continue;
+        }
+
+        DWORD cloaked = 0;
+
+        if (SUCCEEDED(DwmGetWindowAttribute(above, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) {
+            continue;
+        }
+
+        const RECT other = visibleBounds(above);
+        RECT overlap;
+
+        if (!IntersectRect(&overlap, &other, &bounds)) {
+            continue;
+        }
+
+        if (overlap.top >= bounds.bottom - edgeSlack) {
+            bounds.bottom = overlap.top;
+        } else if (overlap.bottom <= bounds.top + edgeSlack) {
+            bounds.top = overlap.bottom;
+        } else if (overlap.left >= bounds.right - edgeSlack) {
+            bounds.right = overlap.left;
+        } else if (overlap.right <= bounds.left + edgeSlack) {
+            bounds.left = overlap.right;
+        } else {
+            if (coveredBy) {
+                *coveredBy = above;
+            }
+
+            return false;
+        }
+    }
+
+    return !IsRectEmpty(&bounds);
+}
+
+// A window that is wholly on this output and not covered is taken straight from the composed desktop: it is what
+// the screen shows, at the desktop's brightness, and Windows.Graphics.Capture (whose yellow border Windows 10 and
+// some Windows 11 builds draw whatever the app asks) is not needed. Null otherwise.
+QPixmap cropDesktop(HWND window, const HdrOutput &hdr)
+{
+    const RECT &origin = hdr.description.DesktopCoordinates;
+    RECT bounds = visibleBounds(window);
+    RECT inside;
+
+    // A window further off screen than edgeSlack is left to Windows.Graphics.Capture, which has the hidden part.
+    if (IsIconic(window) || IsRectEmpty(&bounds) || !IntersectRect(&inside, &bounds, &origin)
+        || inside.left - bounds.left > edgeSlack || inside.top - bounds.top > edgeSlack
+        || bounds.right - inside.right > edgeSlack || bounds.bottom - inside.bottom > edgeSlack) {
+        note(QStringLiteral("  not wholly on this output (frame %1,%2 to %3,%4)")
+                 .arg(bounds.left).arg(bounds.top).arg(bounds.right).arg(bounds.bottom));
+        return QPixmap();
+    }
+
+    if (!EqualRect(&inside, &bounds)) {
+        note(QStringLiteral("  frame cut at the screen edge to %1x%2")
+                 .arg(inside.right - inside.left).arg(inside.bottom - inside.top));
+        bounds = inside;
+    }
+
+    HWND coveredBy = nullptr;
+    const RECT before = bounds;
+
+    const bool shown = uncovered(window, bounds, &coveredBy);
+
+    if (shown && !EqualRect(&before, &bounds)) {
+        note(QStringLiteral("  edge strip under another window left out: %1x%2")
+                 .arg(bounds.right - bounds.left).arg(bounds.bottom - bounds.top));
+    }
+
+    if (!shown && !coveredBy) {
+        note(QStringLiteral("  nothing left uncovered"));
+        return QPixmap();
+    }
+
+    if (!shown) {
+        if (trace) {
+            wchar_t className[64] = {};
+            wchar_t title[64] = {};
+            GetClassNameW(coveredBy, className, 64);
+            GetWindowTextW(coveredBy, title, 64);
+            const RECT other = visibleBounds(coveredBy);
+            DWORD process = 0;
+            GetWindowThreadProcessId(coveredBy, &process);
+            QString program = QString::number(process);
+
+            if (HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process)) {
+                wchar_t path[MAX_PATH] = {};
+                DWORD size = MAX_PATH;
+
+                if (QueryFullProcessImageNameW(handle, 0, path, &size)) {
+                    program = QString::fromWCharArray(path, int(size)).section(QLatin1Char('\\'), -1);
+                }
+
+                CloseHandle(handle);
+            }
+
+            note(QStringLiteral("  covered by another window: \"%1\" (%2), %3,%4 to %5,%6, style %7, extended style %8, "
+                                "program %9")
+                     .arg(QString::fromWCharArray(title), QString::fromWCharArray(className))
+                     .arg(other.left).arg(other.top).arg(other.right).arg(other.bottom)
+                     .arg(quint32(GetWindowLongW(coveredBy, GWL_STYLE)), 8, 16, QLatin1Char('0'))
+                     .arg(quint32(GetWindowLongW(coveredBy, GWL_EXSTYLE)), 8, 16, QLatin1Char('0'))
+                     .arg(program));
+        }
+
+        return QPixmap();
+    }
+
+    // The window picker closes just before this; wait for the desktop to be composed without it.
+    DwmFlush();
+
+    // Only the window's rectangle is read off the GPU. It is in desktop orientation, so a rotated panel (whose
+    // frame is in its own orientation) is left to the other path.
+    const int x = bounds.left - origin.left;
+    const int y = bounds.top - origin.top;
+    const QRect region(x, y, bounds.right - bounds.left, bounds.bottom - bounds.top);
+    DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
+    const Fp16Image desktop = duplicateFrame(hdr, &rotation, region);
+
+    if (desktop.isNull() || (rotation != DXGI_MODE_ROTATION_IDENTITY && rotation != DXGI_MODE_ROTATION_UNSPECIFIED)
+        || desktop.width != region.width() || desktop.height != region.height()) {
+        note(QStringLiteral("  no usable desktop frame (rotation %1)").arg(int(rotation)));
+        return QPixmap();
+    }
+
+    // Not checked for a flat image: a window is often almost all white (an empty document), and its scale is the
+    // screen's, which the screen capture and the SDR white level check already cover.
+    const QImage image = HdrCapture::scRgbToSrgb(desktop.pixels.data(), desktop.width, desktop.height,
+                                                 desktop.bytesPerLine(), hdr.sdrWhite);
+    note(QStringLiteral("  cropped from the desktop at %1,%2, divided by the SDR white level %3")
+             .arg(x).arg(y).arg(hdr.sdrWhite));
     return image.isNull() ? QPixmap() : QPixmap::fromImage(image);
+}
+
+QPixmap calibratedWindow(HWND window, const HdrOutput &hdr)
+{
+    note(QStringLiteral(" Windows.Graphics.Capture:"));
+    const Fp16Image frame = windowFrame(window, hdr);
+
+    if (frame.isNull()) {
+        return QPixmap();
+    }
+
+    DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
+    note(QStringLiteral(" Desktop duplication, for comparison:"));
+    const Fp16Image desktop = duplicateFrame(hdr, &rotation);
+
+    if (desktop.isNull() || (rotation != DXGI_MODE_ROTATION_IDENTITY && rotation != DXGI_MODE_ROTATION_UNSPECIFIED)) {
+        note(QStringLiteral("  no desktop frame to compare with (rotation %1)").arg(int(rotation)));
+        return QPixmap();
+    }
+
+    // Where the frame sits on this output: at the visible frame DWM reports, or at the window rectangle when the
+    // frame has that rectangle's size.
+    RECT bounds;
+    RECT full;
+    GetWindowRect(window, &full);
+
+    if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) {
+        bounds = full;
+    }
+
+    if (frame.width == full.right - full.left && frame.height == full.bottom - full.top) {
+        bounds = full;
+    }
+
+    const RECT &origin = hdr.description.DesktopCoordinates;
+    const QPoint offset(bounds.left - origin.left, bounds.top - origin.top);
+    const float scale = HdrCapture::matchScale(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(),
+                                               desktop.pixels.data(), desktop.width, desktop.height,
+                                               desktop.bytesPerLine(), offset);
+    note(QStringLiteral("  window at %1,%2 on the output; desktop / window = %3")
+             .arg(offset.x()).arg(offset.y()).arg(scale));
+
+    if (!(scale > 0)) {
+        return QPixmap();
+    }
+
+    if (!HdrCapture::plausibleCalibration(scale)) {
+        note(QStringLiteral("  factor outside 0.2 to 10: not believed"));
+        return QPixmap();
+    }
+
+    const float white = hdr.sdrWhite / scale;
+    note(QStringLiteral("  divided by %1").arg(white));
+    const QImage image = convertChecked(frame.pixels.data(), frame.width, frame.height, frame.bytesPerLine(), white);
+    return image.isNull() ? QPixmap() : QPixmap::fromImage(image);
+}
+
+// The traces of the app's last captures, kept in the temp folder so that `--hdr-report` (another process) can show
+// which path a real capture took and why: 1 is the newest, up to captureLogCount. Only when no report is tracing.
+const int captureLogCount = 5;
+
+QString captureLogPath(int number)
+{
+    return QDir(QDir::tempPath()).filePath(QStringLiteral("lightscreen-hdr-capture-%1.txt").arg(number));
+}
+
+// Set while report() runs: its own untraced timing runs must not replace the log of the app's last capture.
+bool reporting = false;
+
+class CaptureLog
+{
+public:
+    explicit CaptureLog(const QString &what)
+        : mActive(!trace && !reporting)
+    {
+        if (mActive) {
+            trace = &mLines;
+            note(QStringLiteral("%1, %2").arg(what, QDateTime::currentDateTime().toString(Qt::ISODateWithMs)));
+        }
+    }
+
+    ~CaptureLog()
+    {
+        if (!mActive) {
+            return;
+        }
+
+        trace = nullptr;
+        QFile::remove(captureLogPath(captureLogCount));
+
+        for (int number = captureLogCount - 1; number >= 1; --number) {
+            QFile::rename(captureLogPath(number), captureLogPath(number + 1));
+        }
+
+        QFile file(captureLogPath(1));
+
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            file.write(mLines.join(QLatin1Char('\n')).toUtf8());
+            file.write("\n");
+        }
+    }
+
+    void result(bool used, const QString &fallback)
+    {
+        note(used ? QStringLiteral("  -> used") : QStringLiteral("  -> failed, %1 is used").arg(fallback));
+    }
+
+private:
+    QStringList mLines;
+    bool mActive;
+};
+
+// The marker file of the crash tripwire, present while an HDR capture runs (see setCrashMarkerPath).
+QString crashMarkerPath;
+
+class CrashMarker
+{
+public:
+    CrashMarker()
+    {
+        if (crashMarkerPath.isEmpty()) {
+            return;
+        }
+
+        QFile file(crashMarkerPath);
+
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(QDateTime::currentDateTime().toString(Qt::ISODateWithMs).toUtf8());
+            mWritten = true;
+        }
+    }
+
+    ~CrashMarker()
+    {
+        if (mWritten) {
+            QFile::remove(crashMarkerPath);
+        }
+    }
+
+private:
+    bool mWritten = false;
+};
+
+QPixmap captureWindow(HWND window, const HdrOutput &hdr)
+{
+    note(QStringLiteral(" Desktop duplication, uncovered window:"));
+    const QPixmap cropped = cropDesktop(window, hdr);
+    return cropped.isNull() ? calibratedWindow(window, hdr) : cropped;
 }
 } // namespace
 #endif
 
+namespace {
+bool enabled = true;
+}
+
+void HdrCapture::setEnabled(bool on)
+{
+    enabled = on;
+}
+
+bool HdrCapture::isEnabled()
+{
+    return enabled;
+}
+
+void HdrCapture::setCrashMarkerPath(const QString &path)
+{
+#ifdef Q_OS_WIN
+    crashMarkerPath = path;
+#else
+    Q_UNUSED(path)
+#endif
+}
+
+bool HdrCapture::takeCrashMarker()
+{
+#ifdef Q_OS_WIN
+    return !crashMarkerPath.isEmpty() && QFile::exists(crashMarkerPath) && QFile::remove(crashMarkerPath);
+#else
+    return false;
+#endif
+}
+
+QString HdrCapture::deviceName(const QScreen *screen)
+{
+    if (!screen) {
+        return QString();
+    }
+
+#ifdef Q_OS_WIN
+    // QScreen::name() is the monitor's model name in Qt 6 ("VP2786-4K"), not the GDI device name DXGI uses. A screen's
+    // logical top left is its native top left, so the monitor there is this screen.
+    const QPoint corner = screen->geometry().topLeft();
+    HMONITOR monitor = MonitorFromPoint(POINT { corner.x(), corner.y() }, MONITOR_DEFAULTTONULL);
+    MONITORINFOEXW info = {};
+    info.cbSize = sizeof(info);
+
+    if (monitor && GetMonitorInfoW(monitor, &info)) {
+        return QString::fromWCharArray(info.szDevice);
+    }
+#endif
+
+    return screen->name();
+}
+
 QPixmap HdrCapture::grabScreen(const QString &deviceName)
 {
 #ifdef Q_OS_WIN
-    HdrOutput hdr;
-    return findHdrOutput(deviceName, hdr) ? duplicate(hdr) : QPixmap();
+    if (!enabled) {
+        return QPixmap();
+    }
+
+    CaptureLog log(QStringLiteral("Screen capture of %1").arg(deviceName));
+    CrashMarker marker;
+
+    // Any C++ exception (a failed 66 MB allocation) falls back to Qt's grab instead of ending the app.
+    try {
+        HdrOutput hdr;
+
+        if (!findHdrOutput(deviceName, hdr)) {
+            note(QStringLiteral("  no HDR output named %1").arg(deviceName));
+            log.result(false, QStringLiteral("Qt's grab"));
+            return QPixmap();
+        }
+
+        const QPixmap grab = duplicate(hdr);
+        log.result(!grab.isNull(), QStringLiteral("Qt's grab"));
+        return grab;
+    } catch (const std::exception &error) {
+        note(QStringLiteral("  exception: %1").arg(QString::fromLocal8Bit(error.what())));
+    } catch (...) {
+        note(QStringLiteral("  unknown exception"));
+    }
+
+    log.result(false, QStringLiteral("Qt's grab"));
+    return QPixmap();
 #else
     Q_UNUSED(deviceName)
     return QPixmap();
@@ -479,18 +1357,207 @@ QPixmap HdrCapture::grabScreen(const QString &deviceName)
 QPixmap HdrCapture::grabWindow(WId window)
 {
 #ifdef Q_OS_WIN
-    HMONITOR monitor = MonitorFromWindow(HWND(window), MONITOR_DEFAULTTONULL);
-    MONITORINFOEXW info = {};
-    info.cbSize = sizeof(info);
-
-    if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+    if (!enabled) {
         return QPixmap();
     }
 
-    HdrOutput hdr;
-    return findHdrOutput(QString::fromWCharArray(info.szDevice), hdr) ? captureWindow(HWND(window), hdr) : QPixmap();
+    CaptureLog log(QStringLiteral("Window capture"));
+    CrashMarker marker;
+
+    try {
+        HMONITOR monitor = MonitorFromWindow(HWND(window), MONITOR_DEFAULTTONULL);
+        MONITORINFOEXW info = {};
+        info.cbSize = sizeof(info);
+
+        if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+            note(QStringLiteral("  no monitor"));
+            log.result(false, QStringLiteral("PrintWindow"));
+            return QPixmap();
+        }
+
+        HdrOutput hdr;
+
+        if (!findHdrOutput(QString::fromWCharArray(info.szDevice), hdr)) {
+            note(QStringLiteral("  no HDR output named %1").arg(QString::fromWCharArray(info.szDevice)));
+            log.result(false, QStringLiteral("PrintWindow"));
+            return QPixmap();
+        }
+
+        const QPixmap grab = captureWindow(HWND(window), hdr);
+        log.result(!grab.isNull(), QStringLiteral("PrintWindow"));
+        return grab;
+    } catch (const std::exception &error) {
+        note(QStringLiteral("  exception: %1").arg(QString::fromLocal8Bit(error.what())));
+    } catch (...) {
+        note(QStringLiteral("  unknown exception"));
+    }
+
+    log.result(false, QStringLiteral("PrintWindow"));
+    return QPixmap();
 #else
     Q_UNUSED(window)
     return QPixmap();
 #endif
+}
+
+bool HdrCapture::uncovered(WId window)
+{
+#ifdef Q_OS_WIN
+    RECT bounds = visibleBounds(HWND(window));
+    return ::uncovered(HWND(window), bounds);
+#else
+    Q_UNUSED(window)
+    return false;
+#endif
+}
+
+QString HdrCapture::report()
+{
+    QStringList lines;
+
+#ifdef Q_OS_WIN
+    // Read first: the window timings below run os::grabWindow, which logs over it.
+    QStringList captureLogs;
+
+    for (int number = 1; number <= captureLogCount; ++number) {
+        QFile file(captureLogPath(number));
+
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            captureLogs << QString::fromUtf8(file.readAll()).trimmed();
+        }
+    }
+
+    trace = &lines;
+    reporting = true;
+
+    for (QScreen *screen : QGuiApplication::screens()) {
+        const QString device = deviceName(screen);
+        lines << QStringLiteral("Screen %1 (%7), Qt geometry %2,%3 %4x%5 at %6")
+                     .arg(screen->name())
+                     .arg(screen->geometry().x())
+                     .arg(screen->geometry().y())
+                     .arg(screen->geometry().width())
+                     .arg(screen->geometry().height())
+                     .arg(screen->devicePixelRatio())
+                     .arg(device);
+
+        // What Qt's (GDI) grab gives, for comparison: the most common 8-bit colours.
+        {
+            const QImage qtGrab = screen->grabWindow(0).toImage().convertToFormat(QImage::Format_RGB32);
+            QHash<QRgb, int> counts;
+
+            for (int y = 0; y < qtGrab.height(); ++y) {
+                const QRgb *line = reinterpret_cast<const QRgb *>(qtGrab.constScanLine(y));
+
+                for (int x = 0; x < qtGrab.width(); ++x) {
+                    ++counts[line[x] & 0xFFFFFF];
+                }
+            }
+
+            QList<QPair<int, QRgb>> sorted;
+
+            for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+                sorted.append({ it.value(), it.key() });
+            }
+
+            std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            lines << QStringLiteral(" Qt grab %1x%2, most common colours (8-bit):").arg(qtGrab.width()).arg(qtGrab.height());
+
+            for (int i = 0; i < qMin(8, int(sorted.size())); ++i) {
+                const QRgb c = sorted.at(i).second;
+                lines << QStringLiteral("    %1 %2 %3  %4%")
+                             .arg(qRed(c))
+                             .arg(qGreen(c))
+                             .arg(qBlue(c))
+                             .arg(100.0 * sorted.at(i).first / (qint64(qtGrab.width()) * qtGrab.height()), 0, 'f', 1);
+            }
+        }
+
+        HdrOutput hdr;
+
+        if (!findHdrOutput(device, hdr)) {
+            lines << QStringLiteral("  not HDR (or not found): Qt's grab is used");
+            continue;
+        }
+
+        lines << QStringLiteral(" Desktop duplication:");
+        QElapsedTimer timer;
+        timer.start();
+        const QPixmap grab = duplicate(hdr);
+        const qint64 hdrTime = timer.elapsed();
+        timer.restart();
+        screen->grabWindow(0);
+        lines << (grab.isNull() ? QStringLiteral("  -> failed, Qt's grab is used") : QStringLiteral("  -> used"));
+        lines << QStringLiteral("  time: %1 ms (Qt's grab: %2 ms)").arg(hdrTime).arg(timer.elapsed());
+    }
+
+    // Every visible Chromium browser, Explorer and Notepad window: what Windows.Graphics.Capture hands over, so a
+    // browser can be compared with ordinary SDR windows.
+    EnumWindows(
+        [](HWND window, LPARAM) -> BOOL {
+            wchar_t className[64] = {};
+            GetClassNameW(window, className, 64);
+
+            if (!IsWindowVisible(window) || IsIconic(window)
+                || (QString::fromWCharArray(className) != QLatin1String("Chrome_WidgetWin_1")
+                    && QString::fromWCharArray(className) != QLatin1String("CabinetWClass")
+                    && QString::fromWCharArray(className) != QLatin1String("Notepad"))
+                || GetWindowTextLengthW(window) == 0) {
+                return TRUE;
+            }
+
+            wchar_t title[256] = {};
+            GetWindowTextW(window, title, 256);
+            note(QStringLiteral("Window \"%1\" (%2)").arg(QString::fromWCharArray(title).left(60), QString::fromWCharArray(className)));
+
+            HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
+            MONITORINFOEXW info = {};
+            info.cbSize = sizeof(info);
+            HdrOutput hdr;
+
+            if (!monitor || !GetMonitorInfoW(monitor, &info)
+                || !findHdrOutput(QString::fromWCharArray(info.szDevice), hdr)) {
+                note(QStringLiteral("  not on an HDR monitor"));
+                return TRUE;
+            }
+
+            QElapsedTimer timer;
+            timer.start();
+            const qsizetype start = trace->size();
+            const QPixmap grab = captureWindow(window, hdr);
+            const bool cropped = trace->mid(start).filter(QStringLiteral("cropped from the desktop")).size() > 0;
+            const qint64 hdrTime = timer.elapsed();
+            QStringList *const saved = trace;
+            trace = nullptr; // the whole path again, untraced
+            timer.restart();
+            os::grabWindow(WId(window));
+            trace = saved;
+            note(grab.isNull() ? QStringLiteral("  -> failed, PrintWindow is used") : QStringLiteral("  -> used"));
+            note(QStringLiteral("  time: %1 ms (whole os::grabWindow, HDR path included: %2 ms)").arg(hdrTime).arg(timer.elapsed()));
+
+            if (cropped) {
+                note(QStringLiteral(" For comparison, the covered-window path:"));
+                note(calibratedWindow(window, hdr).isNull() ? QStringLiteral("  -> would fail") : QStringLiteral("  -> would work"));
+            }
+
+            return TRUE;
+        },
+        0);
+
+    trace = nullptr;
+    reporting = false;
+    lines << QStringLiteral("Last %1 captures in the app before this report, newest first:").arg(captureLogCount);
+
+    if (captureLogs.isEmpty()) {
+        lines << QStringLiteral("  none logged");
+    }
+
+    for (const QString &log : std::as_const(captureLogs)) {
+        lines << log;
+    }
+#else
+    lines << QStringLiteral("HDR capture is Windows only.");
+#endif
+
+    return lines.join(QLatin1Char('\n'));
 }

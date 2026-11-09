@@ -17,8 +17,14 @@
  *
  */
 #include <QApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QLocale>
+#include <QMessageBox>
+#include <QStandardPaths>
 
+#include <tools/hdrcapture.h>
 #include <tools/os.h>
 #include <tools/settings.h>
 #include "tools/SingleApplication/singleapplication.h"
@@ -37,6 +43,30 @@ int main(int argc, char *argv[])
     // scale (125%, 150%, 175%), so the windows match other apps; until 3.0 it was rounded to 100% or 200% as in
     // Qt 5. Capture and area selection work in fractional ratios since S04 (tools/capturegeometry).
     QApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+
+    // Bug 9 diagnostics: "lightscreen --hdr-report" writes what the HDR capture path sees to a text file on the
+    // desktop and quits, without starting (or reaching) the normal instance.
+    for (int i = 1; i < argc; ++i) {
+        if (qstrcmp(argv[i], "--hdr-report") == 0) {
+            QApplication report(argc, argv);
+            const QString path = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)
+                                 + QStringLiteral("/lightscreen-hdr-report.txt");
+            QDir().mkpath(QFileInfo(path).path());
+            QFile file(path);
+
+            if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                file.write(QStringLiteral("Lightscreen Rd %1\n%2\n").arg(APP_VERSION, HdrCapture::report()).toUtf8());
+                file.close();
+                QMessageBox::information(nullptr, QStringLiteral("Lightscreen Rd"),
+                                         QStringLiteral("HDR report written to %1").arg(QDir::toNativeSeparators(path)));
+            } else {
+                QMessageBox::warning(nullptr, QStringLiteral("Lightscreen Rd"),
+                                     QStringLiteral("Could not write %1").arg(QDir::toNativeSeparators(path)));
+            }
+
+            return 0;
+        }
+    }
 
     SingleApplication application(argc, argv);
 

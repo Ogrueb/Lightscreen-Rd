@@ -83,6 +83,8 @@ To run the smoke locally after a Linux build, copy the script from the "Smoke te
 - **"Run workflow"** on the Actions tab (`workflow_dispatch`): a dry run. Same build, then a draft *pre-release* named "Dry run N" under the tag `dry-run-N`, attached to the commit that was built. A draft does not create its tag, and a pre-release is never "latest", but delete the draft after looking at it rather than publishing it.
 - **A pull request that changes `release.yml`**: build and zip only (the zip is on the run's page as an artifact), no release.
 
+Before pushing a `v*` tag, run the open Windows QA checks (`docs/windows-qa.md`) on a dry-run or CI zip of the commit to be tagged, including any on special hardware such as an HDR monitor. 3.0.1's first draft was tagged with a defect only an HDR monitor could show (bug 9).
+
 There is no Linux package: Linux users build from source.
 
 ## What broke and how it was fixed

@@ -1,0 +1,6 @@
+# 46. A yellow border can flash when capturing a covered window on an HDR monitor (Windows 10, some Windows 11 builds)
+
+- **Found:** by the owner while testing PR #67 (bug 9) on 2026-11-09, Windows 10 (likely 21H2), HDR on. Lightscreen 2.5 never showed it.
+- **Cause:** with HDR on, a window that another window covers is captured through Windows.Graphics.Capture, so that its colours are right (bug 9). Windows draws a yellow border around a window while it is captured that way. Windows 11 lets an app turn it off (`IsBorderRequired`, after `GraphicsCaptureAccess::RequestAccessAsync(Borderless)`); Windows 10, and Windows 11 builds where `GraphicsCaptureAccess` is not registered, cannot. An uncovered window is cut from the desktop duplication frame instead and shows no border.
+- **Kept on purpose:** the owner chose correct colours over hiding the border (`docs/decisions/2026-11-09-bug-9-covered-window-border.md`). The border never appears in the saved file.
+- **Platform:** Windows 10, and Windows 11 builds without `GraphicsCaptureAccess`, with HDR on; window picker and "Active window" captures of a covered window. **Test:** none automated. **Status:** known issue, won't fix where Windows offers no way to hide the border.
